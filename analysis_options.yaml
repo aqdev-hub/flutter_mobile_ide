@@ -1,0 +1,6 @@
+include: package:flutter_lints/flutter.yaml
+
+linter:
+  rules:
+    prefer_const_constructors: true
+    avoid_print: false # نستخدم print عمدًا كسجلّ تشخيصي مبسّط في عدة أماكن

@@ -1,0 +1,62 @@
+name: flutter_mobile_ide
+description: >
+  Flutter Mobile IDE — محرر أكواد ومشغّل مشاريع Flutter على الهاتف،
+  بواجهة احترافية مستوحاة من VS Code، مع معاينة تفاعلية حية عبر مُفسِّر Dart مُقيّد.
+publish_to: "none"
+version: 0.1.0
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # --- إدارة الحالة ---
+  # Riverpod: مناسب لتطبيق بهذا الحجم لأنه يوفر فصل واضح بين المنطق والواجهة،
+  # ويدعم عدة providers مستقلة (شجرة الملفات، التبويبات، الإعدادات، الكونسول)
+  # بدون تعارض بينها، ويعطينا اختبارية أعلى من Provider/GetX لهذا النوع من التطبيقات.
+  flutter_riverpod: ^2.5.1
+
+  # --- نظام الملفات ---
+  file_picker: ^10.3.10 # اختيار مجلد مشروع من الجهاز (نسخة حديثة متوافقة مع compileSdk 36)
+  path: ^1.9.0 # التعامل مع مسارات الملفات بشكل آمن عبر المنصات
+  path_provider: ^2.1.4 # مسارات تخزين مؤقتة (نسخ/لصق، إعدادات محلية)
+
+  # --- المحرر ---
+  # flutter_code_editor: محرر أكواد جاهز يدعم line numbers، auto-indent،
+  # auto-close للأقواس، تحديد متعدد، undo/redo، وتلوين نحوي عبر highlight.
+  flutter_code_editor: ^0.3.3
+  highlight: ^0.7.0 # قواعد التلوين النحوي (نستخدم تعريف dart)
+  flutter_highlight: ^0.7.0 # الثيمات الجاهزة لتلوين الكود (داكن/فاتح)
+
+  # --- Git ---
+  # git_on_dart: تنفيذ Git بلغة Dart خالصة — لا يوجد ثنائي `git` نظامي على
+  # أندرويد بدون root، فهذه المكتبة (وليس استدعاء عملية git خارجية) هي
+  # الطريقة الوحيدة الواقعية لدعم Git محليًا هنا.
+  # ⚠️ تنبيه أمانة تقنية: حزمة حديثة جدًا وقليلة الاستخدام في المجتمع —
+  # قيد التحقق التدريجي من توقيعاتها الفعلية (راجع git_service.dart).
+  git_on_dart: ^0.1.4
+
+  # ⚠️ أُزيلت flutter_eval/dart_eval هنا بعد اختبار فعلي حقيقي كشف خللًا
+  # جوهريًا موثَّقًا (github.com/ethanblake4/flutter_eval discussion #9)
+  # يمنع تنفيذ أي صنف مستخدم يرث من StatelessWidget/StatefulWidget —
+  # أي أنه معطوب في أبسط استخدام ممكن. عدنا للمُحلِّل اليدوي المستقر
+  # (dart_subset_parser/widget_interpreter/builtin_widgets) كمحرّك التشغيل
+  # الفعلي الوحيد من جديد.
+
+  # --- تخزين محلي بسيط للإعدادات ---
+  shared_preferences: ^2.3.2
+  permission_handler: ^11.3.1 # طلب صلاحية الوصول لملفات الجهاز (Scoped Storage على أندرويد 11+)
+
+  # أدوات مساعدة
+  uuid: ^4.5.1
+  equatable: ^2.0.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
