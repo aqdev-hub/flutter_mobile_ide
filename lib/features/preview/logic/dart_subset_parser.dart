@@ -73,6 +73,16 @@ class _Lexer {
 
   _Token _readNumber() {
     final start = pos;
+    // دعم الصيغة السداسية عشرية: 0x.../0X... — بدونها كانت 0xFFE3F2FD
+    // تُقرأ كرمزين مكسورين ("0" ثم مُعرِّف "xFFE3F2FD")، وهو السبب الجذري
+    // وراء فشل أي استخدام لـ Color(0x...).
+    if (src[pos] == '0' && pos + 1 < src.length && (src[pos + 1] == 'x' || src[pos + 1] == 'X')) {
+      pos += 2;
+      while (pos < src.length && RegExp(r'[0-9a-fA-F]').hasMatch(src[pos])) {
+        pos++;
+      }
+      return _Token(_TokType.number, src.substring(start, pos));
+    }
     while (pos < src.length && RegExp(r'[0-9.]').hasMatch(src[pos])) {
       pos++;
     }

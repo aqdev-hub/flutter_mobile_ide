@@ -52,6 +52,7 @@ class ClassExtractor {
 
       try {
         final baseName = baseType.startsWith('State<') ? 'State' : baseType;
+        final (buildBody, buildParseError) = _extractBuildBody(body, bodyStart, name);
         defs.add(WidgetClassDef(
           name: name,
           baseType: baseName,
@@ -63,7 +64,8 @@ class ClassExtractor {
           // متغيرات محلية معرَّفة داخل build/الدوال المساعدة كحقول حالة
           // دائمة بالخطأ.
           fields: _extractFields(_maskNestedBlocks(body), bodyStart, name),
-          buildBody: _extractBuildBody(body, bodyStart, name),
+          buildBody: buildBody,
+          buildParseError: buildParseError,
           methods: _extractMethods(body, bodyStart, name),
         ));
       } catch (e) {
@@ -146,8 +148,10 @@ class ClassExtractor {
   }
 
   /// يستخرج جسم build **كاملًا** كقائمة جُمل (يسمح بمتغيرات محلية/حلقات/
-  /// شروط قبل الجملة الأخيرة return).
-  List<Stmt>? _extractBuildBody(String classBody, int bodyStart, String className) {
+  /// شروط قبل الجملة الأخيرة return). يُعيد أيضًا رسالة الخطأ الحقيقية عند
+  /// الفشل (بدل الاكتفاء بـ null) حتى تظهر للمستخدم أثناء التشغيل الفعلي،
+  /// وليس فقط في تبويب Problems.
+  (List<Stmt>?, String?) _extractBuildBody(String classBody, int bodyStart, String className) {
     final arrowMatch =
         RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+\w+\s*\)\s*=>').firstMatch(classBody);
     if (arrowMatch != null) {
@@ -155,13 +159,11 @@ class ClassExtractor {
       final semicolon = rest.indexOf(';');
       final exprSrc = semicolon == -1 ? rest : rest.substring(0, semicolon);
       try {
-        return [ReturnStmt(DartSubsetParser.parseExpressionSource(exprSrc))];
+        return ([ReturnStmt(DartSubsetParser.parseExpressionSource(exprSrc))], null);
       } catch (e) {
-        issues.add(ExtractionIssue(
-          'تعذّر تحليل تعبير build في الصنف "$className": $e',
-          line: _lineAt(bodyStart + 1 + arrowMatch.end),
-        ));
-        return null;
+        final msg = 'تعذّر تحليل تعبير build في الصنف "$className": $e';
+        issues.add(ExtractionIssue(msg, line: _lineAt(bodyStart + 1 + arrowMatch.end)));
+        return (null, msg);
       }
     }
 
@@ -169,39 +171,64 @@ class ClassExtractor {
         RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+\w+\s*\)\s*\{').firstMatch(classBody);
     if (blockMatch == null) {
       // لا توجد دالة build إطلاقًا في هذا الصنف — طبيعي لأصناف StatefulWidget
-      // (build موجودة في صنف State وليس هنا)، لذا لا نُسجّل هذا كمشكلة دائمًا؛
-      // فقط عندما يبدو الصنف widget-like (StatelessWidget) نُنبّه.
-      return null;
+      // (build موجودة في صنف State وليس هنا)، لذا لا نُسجّل هذا كمشكلة أو
+      // كخطأ، فقط نُعيد (null, null) بصمت.
+      return (null, null);
     }
     final start = blockMatch.end - 1;
     final end = _matchClosingBrace(classBody, start);
     if (end == -1) {
-      issues.add(ExtractionIssue(
-        'قوس دالة build في الصنف "$className" غير مغلَق بشكل صحيح',
-        line: _lineAt(bodyStart + 1 + start),
-      ));
-      return null;
+      final msg = 'قوس دالة build في الصنف "$className" غير مغلَق بشكل صحيح';
+      issues.add(ExtractionIssue(msg, line: _lineAt(bodyStart + 1 + start)));
+      return (null, msg);
     }
     final bodyText = classBody.substring(start + 1, end);
     try {
-      return DartSubsetParser.parseStatementsSource(bodyText);
+      return (DartSubsetParser.parseStatementsSource(bodyText), null);
     } catch (e) {
-      issues.add(ExtractionIssue(
-        'تعذّر تحليل جسم build في الصنف "$className": $e',
-        line: _lineAt(bodyStart + 1 + start),
-      ));
-      return null;
+      final msg = 'تعذّر تحليل جسم build في الصنف "$className": $e';
+      issues.add(ExtractionIssue(msg, line: _lineAt(bodyStart + 1 + start)));
+      return (null, msg);
     }
   }
 
+  /// يحسب عمق التداخل بالأقواس المعقوفة {} عند كل موضع في النص — يُستخدَم
+  /// لتصفية مطابقات استخراج الدوال المساعدة، حتى لا نلتقط أنماطًا تُشبه
+  /// تعريف دالة (مثل `setState(() {` أو `builder: (context) {`) وهي في
+  /// الحقيقة إغلاقات (closures) متداخلة داخل دالة أخرى (خصوصًا build نفسها).
+  List<int> _computeDepthAtEachPosition(String text) {
+    final depthAt = List<int>.filled(text.length + 1, 0);
+    var depth = 0;
+    for (var i = 0; i < text.length; i++) {
+      depthAt[i] = depth;
+      if (text[i] == '{') depth++;
+      if (text[i] == '}') depth = depth > 0 ? depth - 1 : 0;
+    }
+    depthAt[text.length] = depth;
+    return depthAt;
+  }
+
   /// يستخرج كل الدوال المُعرَّفة داخل الصنف عدا build/createState.
+  ///
+  /// **إصلاح جوهري**: كنا سابقًا نفحص النص الكامل غير المُقنَّع بحثًا عن نمط
+  /// "اسم(معاملات) {"، وهذا كان يلتقط أي إغلاق (closure) متداخل داخل build
+  /// (أشيعها: `setState(() { ... })`) ويُسجِّله خطأً كدالة مساعدة على مستوى
+  /// الصنف، بحدود أقواس مُلتقَطة من موضع خاطئ تمامًا — ما كان يُفسد سجلّ
+  /// الدوال بطرق غير متوقعة (ومنها على الأرجح خطأ "value غير معروف" الذي
+  /// ظهر أثناء الاختبار). الآن نتحقق أن كل مطابقة تبدأ عند "المستوى صفر"
+  /// من الصنف فعليًا (خارج أي {} متداخل بالفعل) قبل قبولها.
   List<MethodDef> _extractMethods(String classBody, int bodyStart, String className) {
     final methods = <MethodDef>[];
+    final depthAt = _computeDepthAtEachPosition(classBody);
     final methodRegex = RegExp(
       r'(?:^|\n)[ \t]*(?:[\w<>?\[\],\s]+?)\s+(_?\w+)\s*\(([^)]*)\)\s*(\{|=>)',
       multiLine: true,
     );
     for (final match in methodRegex.allMatches(classBody)) {
+      // تجاهل أي مطابقة داخل {} متداخل بالفعل — ليست تعريف دالة حقيقي على
+      // مستوى الصنف، بل جزء من جسم دالة أخرى (غالبًا closure متداخل).
+      if (depthAt[match.start] != 0) continue;
+
       final name = match.group(1)!;
       if (name == 'build' || name == 'createState') continue;
 

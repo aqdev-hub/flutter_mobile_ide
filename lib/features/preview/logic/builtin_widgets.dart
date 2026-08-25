@@ -391,6 +391,7 @@ class BuiltinWidgets {
 
       case 'TextField':
         return TextField(
+          controller: arg('controller') as TextEditingController?,
           onChanged: _asStringCb(arg('onChanged')),
           decoration: arg('decoration') as InputDecoration? ?? const InputDecoration(),
           obscureText: arg('obscureText') as bool? ?? false,
@@ -477,7 +478,11 @@ class BuiltinWidgets {
           labelText: arg('labelText') as String?,
           prefixIcon: arg('prefixIcon') as Widget?,
           suffixIcon: arg('suffixIcon') as Widget?,
-          border: const OutlineInputBorder(),
+          // كنا سابقًا نفرض OutlineInputBorder ثابتة ونتجاهل ما يكتبه
+          // المستخدم فعليًا — وهذا بالضبط ما كان يُسبّب فشل استخدام
+          // OutlineInputBorder() صراحةً (يُقيَّم كوسيط قبل تجاهله، فيفشل
+          // إن لم يكن مسجَّلًا أصلًا). الآن نقرأ القيمة الفعلية.
+          border: arg('border') as InputBorder? ?? const OutlineInputBorder(),
         );
       case 'BoxDecoration':
         return BoxDecoration(
@@ -533,6 +538,19 @@ class BuiltinWidgets {
           icon: arg('icon') as Widget? ?? const Icon(Icons.circle),
           label: arg('label') as String? ?? '',
         );
+      case 'Color':
+        // Color(0xFFE3F2FD) — يحتاج دعم قراءة الأرقام السداسية عشرية في
+        // المُحلِّل اللفظي (dart_subset_parser.dart)، وهو مُصلَح الآن.
+        return Color((pos.isNotEmpty ? pos[0] as int : 0));
+      case 'TextEditingController':
+        // كائن Flutter حقيقي (وليس محاكاة) — يُمرَّر فعليًا لِـ TextField
+        // عبر معامل controller: الجديد، ويدعم .text و.clear() (راجع
+        // widget_interpreter.dart لتفاصيل الدعم المحدود لتوابعه).
+        return TextEditingController(text: arg('text') as String? ?? '');
+      case 'OutlineInputBorder':
+        return const OutlineInputBorder();
+      case 'UnderlineInputBorder':
+        return const UnderlineInputBorder();
       default:
         return null;
     }
@@ -630,6 +648,7 @@ class BuiltinWidgets {
     'TextOverflow.fade': TextOverflow.fade,
     'BottomNavigationBarType.fixed': BottomNavigationBarType.fixed,
     'BottomNavigationBarType.shifting': BottomNavigationBarType.shifting,
+    'InputBorder.none': InputBorder.none,
   };
 
   /// أسماء المُنشئات التي تُبنى كقيمة (وليست Widget) — يستخدمها المُفسِّر
@@ -639,6 +658,7 @@ class BuiltinWidgets {
     'TextStyle', 'InputDecoration', 'BoxDecoration',
     'BorderRadius.circular', 'BorderRadius.only', 'Border.all', 'BoxShadow',
     'Offset', 'Duration', 'SliverGridDelegateWithFixedCrossAxisCount',
-    'BottomNavigationBarItem',
+    'BottomNavigationBarItem', 'Color', 'TextEditingController',
+    'OutlineInputBorder', 'UnderlineInputBorder',
   };
 }

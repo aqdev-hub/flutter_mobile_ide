@@ -269,6 +269,15 @@ class Interpreter {
 
   dynamic _resolveIdentifier(String name, RuntimeScope scope) {
     if (scope.has(name)) return scope.resolve(name);
+    // Method Reference: استخدام اسم دالة مساعدة كقيمة بدون استدعائها —
+    // مثل `onPressed: changeMessage` (بلا أقواس). سابقًا كان يُطابَق هذا
+    // فقط عند وجود استدعاء فعلي (اسم متبوع بأقواس)؛ الآن نتحقق أيضًا من
+    // خريطة methods عند تحليل معرِّف مجرّد، ونُغلِّفه بـ InterpretedCallable
+    // مربوطًا بنفس النطاق الحالي حتى يعمل تمامًا كأنه lambda مكافئ.
+    if (scope.methods.containsKey(name)) {
+      final method = scope.methods[name]!;
+      return InterpretedCallable((args) => _invokeMethod(method, args, scope));
+    }
     if (name == 'true') return true;
     if (name == 'false') return false;
     if (name == 'null') return null;
@@ -328,6 +337,7 @@ class Interpreter {
     final target = _eval(expr.target, scope);
     if (target is _WidgetRef) return target.args[expr.name];
     if (target is Map) return target[expr.name];
+    if (target is TextEditingController && expr.name == 'text') return target.text;
     // خاصية غير معروفة على كائن مُفسَّر: نُرجع null بدل تعطّل المعاينة بالكامل.
     return null;
   }
@@ -339,16 +349,39 @@ class Interpreter {
       return _evalNamedCall(callee.name, expr, scope);
     }
 
-    if (callee is PropertyExpr && callee.target is IdentifierExpr) {
-      final namespace = (callee.target as IdentifierExpr).name;
-      if (!scope.has(namespace)) {
-        return _evalNamespacedCall(namespace, callee.name, expr, scope);
+    if (callee is PropertyExpr) {
+      if (callee.target is IdentifierExpr) {
+        final namespace = (callee.target as IdentifierExpr).name;
+        if (!scope.has(namespace)) {
+          return _evalNamespacedCall(namespace, callee.name, expr, scope);
+        }
       }
+      // استدعاء تابع على قيمة حقيقية موجودة في النطاق بالفعل (مثل
+      // nameController.clear()) — نطاق مدعوم محدود عمدًا (TextEditingController
+      // فقط حاليًا)، وليس إرسال توابع عام على أي كائن Dart.
+      return _evalInstanceMethodCall(callee, expr, scope);
     }
 
-    // استدعاء تابع على قيمة مُقيَّمة (مثل controller.someMethod()) — غير
-    // مدعوم في هذا الإصدار؛ نُبلّغ بوضوح بدل الفشل الصامت.
     throw PreviewRuntimeException('استدعاء غير مدعوم في هذا الإصدار من المُفسِّر');
+  }
+
+  /// استدعاءات توابع مدعومة على كائنات Dart حقيقية (وليست ودجتس) يُنشئها
+  /// المُفسِّر عبر BuiltinWidgets.buildValue — التغطية محدودة عمدًا لأشيع
+  /// الاستخدامات (TextEditingController.clear) بدل إرسال توابع عام.
+  dynamic _evalInstanceMethodCall(PropertyExpr callee, CallExpr expr, RuntimeScope scope) {
+    final target = _eval(callee.target, scope);
+    if (target is TextEditingController) {
+      switch (callee.name) {
+        case 'clear':
+          target.clear();
+          return null;
+        case 'dispose':
+          // لا دورة حياة حقيقية (initState/dispose) لأصناف State في هذا
+          // المُفسِّر بعد — نتجاهل الاستدعاء بأمان بدل رفض غير مفيد.
+          return null;
+      }
+    }
+    throw PreviewRuntimeException('استدعاء تابع غير مدعوم بعد: .${callee.name}()');
   }
 
   (List<dynamic>, Map<String, dynamic>) _evalArgs(CallExpr expr, RuntimeScope scope) {
@@ -506,7 +539,9 @@ class Interpreter {
   /// [_ReturnSignal] كناتج نهائي، تمامًا كأي دالة مساعدة أخرى.
   Widget _runBuild(WidgetClassDef def, RuntimeScope buildScope) {
     if (def.buildBody == null) {
-      return _errorWidget('تعذّر تحليل دالة build في الصنف ${def.name}. تحقّق من الصياغة.');
+      final reason = def.buildParseError ??
+          'لا توجد دالة build في هذا الصنف (طبيعي لأصناف StatefulWidget نفسها؛ تحقّق من صنف State المرتبط به).';
+      return _errorWidget('تعذّر بناء ${def.name}: $reason');
     }
     try {
       for (final stmt in def.buildBody!) {

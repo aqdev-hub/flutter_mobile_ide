@@ -48,7 +48,13 @@ class PreviewEngine {
       );
     }
 
-    final runAppMatch = RegExp(r'runApp\s*\(').firstMatch(mainSource);
+    // نتجاهل التعليقات (// ...) قبل البحث عن runApp — بدون هذا، أي تعليق
+    // توضيحي يذكر نص "runApp(" (مثل شرح كيف يعمل هذا الاستخراج نفسه!) كان
+    // يُربك المطابقة النصية البسيطة ويُنتج خطأ "صياغة runApp() غير مكتملة"
+    // زائفًا، رغم أن كود المستخدم الفعلي سليم تمامًا.
+    final searchableSource = _stripLineComments(mainSource);
+
+    final runAppMatch = RegExp(r'runApp\s*\(').firstMatch(searchableSource);
     if (runAppMatch == null) {
       return PreviewBuildResult(
         classRegistry: registry,
@@ -57,14 +63,14 @@ class PreviewEngine {
     }
 
     final argsStart = runAppMatch.end;
-    final argsEnd = _matchClosingParen(mainSource, runAppMatch.end - 1);
+    final argsEnd = _matchClosingParen(searchableSource, runAppMatch.end - 1);
     if (argsEnd == -1) {
       return PreviewBuildResult(
         classRegistry: registry,
         errorMessage: 'صياغة runApp() غير مكتملة أو غير مدعومة.',
       );
     }
-    final exprSource = mainSource.substring(argsStart, argsEnd);
+    final exprSource = searchableSource.substring(argsStart, argsEnd);
 
     try {
       final rootExpr = DartSubsetParser.parseExpressionSource(exprSource);
@@ -77,15 +83,61 @@ class PreviewEngine {
     }
   }
 
+  /// يبحث عن القوس الختامي المطابق، متجاوزًا أي أقواس داخل تعليقات سطر
+  /// واحد (`//`) أو نصوص حرفية ('...'/"...") — بدون هذا، تعليق يحتوي أي
+  /// حرف `(` أو `)` كان يُفسد حساب نهاية runApp(...) الصحيحة.
   int _matchClosingParen(String text, int openIndex) {
     var depth = 0;
-    for (var i = openIndex; i < text.length; i++) {
-      if (text[i] == '(') depth++;
-      if (text[i] == ')') {
+    var i = openIndex;
+    while (i < text.length) {
+      final ch = text[i];
+
+      if (ch == '/' && i + 1 < text.length && text[i + 1] == '/') {
+        while (i < text.length && text[i] != '\n') {
+          i++;
+        }
+        continue;
+      }
+
+      if (ch == "'" || ch == '"') {
+        final quote = ch;
+        i++;
+        while (i < text.length && text[i] != quote) {
+          if (text[i] == '\\' && i + 1 < text.length) i++;
+          i++;
+        }
+        i++; // تجاوز علامة الاقتباس الختامية
+        continue;
+      }
+
+      if (ch == '(') depth++;
+      if (ch == ')') {
         depth--;
         if (depth == 0) return i;
       }
+      i++;
     }
     return -1;
+  }
+
+  /// يستبدل محتوى كل تعليق `// ...` بمسافات (وليس حذفه) حتى تبقى كل
+  /// الأطوال والمواضع الحرفية مطابقة للنص الأصلي — بنفس أسلوب
+  /// `_maskNestedBlocks` في class_extractor.dart. هذا يمنع أي قوس أو نص
+  /// "runApp(" داخل تعليق توضيحي من التأثير على المطابقة النصية أدناه.
+  String _stripLineComments(String source) {
+    final buffer = StringBuffer();
+    var i = 0;
+    while (i < source.length) {
+      if (source[i] == '/' && i + 1 < source.length && source[i + 1] == '/') {
+        while (i < source.length && source[i] != '\n') {
+          buffer.write(' ');
+          i++;
+        }
+      } else {
+        buffer.write(source[i]);
+        i++;
+      }
+    }
+    return buffer.toString();
   }
 }

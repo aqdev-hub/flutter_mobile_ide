@@ -208,6 +208,11 @@ class WidgetClassDef {
   final List<FieldDecl> fields;
   final List<Stmt>? buildBody;
   final List<MethodDef> methods;
+  // السبب الحقيقي لفشل تحليل build (إن فشل) — يُستخدَم لعرض رسالة خطأ دقيقة
+  // بدل رسالة عامة "تعذّر تحليل build" لا تشرح السبب الفعلي. null يعني إما
+  // نجاح التحليل، أو عدم وجود build إطلاقًا في هذا الصنف (طبيعي لأصناف
+  // StatefulWidget التي تُعرَّف build في صنف State المرتبط بها لا هنا).
+  final String? buildParseError;
 
   WidgetClassDef({
     required this.name,
@@ -216,5 +221,6 @@ class WidgetClassDef {
     this.fields = const [],
     this.buildBody,
     this.methods = const [],
+    this.buildParseError,
   });
 }
