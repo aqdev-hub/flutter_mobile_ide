@@ -23,9 +23,12 @@ class ExtractionIssue {
 /// جزء من الكود بصمت لأن الاستخراج فشل عليه، يظهر تحذير واضح بالسبب.
 class ClassExtractor {
   final String source;
+  // اسم الملف (وليس المسار الكامل) — يُمرَّر إلى كل WidgetClassDef مُستخرَج
+  // منه، ليظهر في تنسيق موضع الخطأ الموحَّد "اسم_الملف.dart — السطر N".
+  final String? fileName;
   final List<ExtractionIssue> issues = [];
 
-  ClassExtractor(this.source);
+  ClassExtractor(this.source, {this.fileName});
 
   int _lineAt(int absoluteOffset) {
     var line = 1;
@@ -67,6 +70,7 @@ class ClassExtractor {
           buildBody: buildBody,
           buildParseError: buildParseError,
           methods: _extractMethods(body, bodyStart, name),
+          sourceFile: fileName,
         ));
       } catch (e) {
         // خلل في استخراج صنف واحد لا يجب أن يُسقط بقية أصناف الملف —

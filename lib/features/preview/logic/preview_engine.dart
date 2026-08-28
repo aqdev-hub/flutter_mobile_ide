@@ -30,7 +30,9 @@ class PreviewEngine {
     final registry = <String, WidgetClassDef>{};
     for (final entry in dartFilesByPath.entries) {
       try {
-        final defs = ClassExtractor(entry.value).extractAll();
+        // اسم الملف فقط (بدون المسار الكامل) — يظهر في رسائل الخطأ الموحَّدة.
+        final fileName = entry.key.split(RegExp(r'[\\/]')).last;
+        final defs = ClassExtractor(entry.value, fileName: fileName).extractAll();
         for (final def in defs) {
           registry[def.name] = def;
         }

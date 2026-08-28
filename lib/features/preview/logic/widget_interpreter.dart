@@ -33,6 +33,15 @@ class _WidgetRef {
   _WidgetRef(this.args);
 }
 
+/// يمثّل نتيجة `ScaffoldMessenger.of(context)` — كائن وسيط بسيط يحمل
+/// BuildContext فقط، حتى نستطيع لاحقًا معالجة `.showSnackBar(...)` عليه
+/// (راجع _evalInstanceMethodCall) بنفس أسلوب سلاسل الاستدعاء الحقيقية في
+/// Flutter (`X.of(context).method(...)`).
+class _ScaffoldMessengerRef {
+  final BuildContext context;
+  _ScaffoldMessengerRef(this.context);
+}
+
 /// بيئة تنفيذ متسلسلة (scope chain): متغيرات محلية (معاملات lambda/دوال)
 /// تبحث أولًا، ثم حقول الحالة المتغيّرة (fields)، ثم الأب (closures متداخلة).
 ///
@@ -129,6 +138,14 @@ class Interpreter {
   /// بناء → ... بلا توقف، وهو ما يظهر للمستخدم كـ"ارتجاف" مستمر للشاشة.
   bool _isBuilding = false;
 
+  // ------------------------- نظام الأخطاء الموحَّد -------------------------
+  // يتتبّعان "الموضع الحالي" أثناء التنفيذ: يُحدَّثان مع كل جملة (_exec) وكل
+  // استدعاء (CallExpr) يُقيَّم، حتى تحمل أي رسالة خطأ — من أي نوع (ودجت غير
+  // مدعوم، متغيّر غير معروف، استدعاء تابع غير مدعوم...) — موضعًا دقيقًا
+  // (اسم الملف + رقم السطر)، وليس فقط أخطاء تحليل build كما كان سابقًا.
+  String? _currentFile;
+  int? _currentLine;
+
   Interpreter({required this.classRegistry, required this.log, required this.onStateChanged});
 
   Widget buildRoot(Expr rootExpr, BuildContext context) {
@@ -144,8 +161,21 @@ class Interpreter {
     }
   }
 
+  /// تنسيق الموضع الحالي بصيغة موحَّدة: "اسم_الملف.dart — السطر N"، أو
+  /// أجزاء منها إن كان جزء من المعلومة غير متوفر (مثل main.dart قبل دخول
+  /// أي صنف مستخدم بعد).
+  String _formatLocation() {
+    final file = _currentFile;
+    final line = _currentLine;
+    if (file != null && line != null) return '$file — السطر $line';
+    if (file != null) return file;
+    if (line != null) return 'السطر $line';
+    return 'موضع غير معروف';
+  }
+
   Widget _errorWidget(String message) {
-    log('خطأ في المعاينة: $message', isError: true);
+    final fullMessage = '${_formatLocation()}: $message';
+    log('خطأ في المعاينة — $fullMessage', isError: true);
     return Material(
       color: Colors.red.shade50,
       child: Padding(
@@ -155,7 +185,7 @@ class Interpreter {
           children: [
             const Icon(Icons.error_outline, color: Colors.red, size: 32),
             const SizedBox(height: 8),
-            Text(message, textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
+            Text(fullMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.red)),
           ],
         ),
       ),
@@ -257,12 +287,17 @@ class Interpreter {
       final index = _eval(expr.index, scope);
       if (target is List) return target[index as int];
       if (target is Map) return target[index];
-      throw PreviewRuntimeException('لا يمكن الفهرسة على هذه القيمة');
+      throw PreviewRuntimeException(
+        'لا يمكن الفهرسة (استخدام []) على قيمة من نوع ${target.runtimeType} — الفهرسة مدعومة فقط على List وMap.',
+      );
     }
 
     if (expr is PropertyExpr) return _evalProperty(expr, scope);
 
-    if (expr is CallExpr) return _evalCall(expr, scope);
+    if (expr is CallExpr) {
+      if (expr.line > 0) _currentLine = expr.line;
+      return _evalCall(expr, scope);
+    }
 
     throw PreviewRuntimeException('نوع تعبير غير مدعوم: ${expr.runtimeType}');
   }
@@ -362,14 +397,18 @@ class Interpreter {
       return _evalInstanceMethodCall(callee, expr, scope);
     }
 
-    throw PreviewRuntimeException('استدعاء غير مدعوم في هذا الإصدار من المُفسِّر');
+    throw PreviewRuntimeException(
+      'استدعاء غير مدعوم في هذا الإصدار من المُفسِّر (نوع الاستدعاء: ${callee.runtimeType}).',
+    );
   }
 
   /// استدعاءات توابع مدعومة على كائنات Dart حقيقية (وليست ودجتس) يُنشئها
-  /// المُفسِّر عبر BuiltinWidgets.buildValue — التغطية محدودة عمدًا لأشيع
-  /// الاستخدامات (TextEditingController.clear) بدل إرسال توابع عام.
+  /// المُفسِّر عبر BuiltinWidgets.buildValue أو مسارات خاصة (مثل
+  /// ScaffoldMessenger.of) — التغطية محدودة عمدًا لأشيع الاستخدامات، وليس
+  /// إرسال توابع عام على أي كائن Dart.
   dynamic _evalInstanceMethodCall(PropertyExpr callee, CallExpr expr, RuntimeScope scope) {
     final target = _eval(callee.target, scope);
+
     if (target is TextEditingController) {
       switch (callee.name) {
         case 'clear':
@@ -381,6 +420,15 @@ class Interpreter {
           return null;
       }
     }
+
+    if (target is _ScaffoldMessengerRef && callee.name == 'showSnackBar') {
+      final (pos, _) = _evalArgs(expr, scope);
+      if (pos.isNotEmpty && pos.first is SnackBar) {
+        ScaffoldMessenger.of(target.context).showSnackBar(pos.first as SnackBar);
+      }
+      return null;
+    }
+
     throw PreviewRuntimeException('استدعاء تابع غير مدعوم بعد: .${callee.name}()');
   }
 
@@ -420,6 +468,19 @@ class Interpreter {
         if (builder is InterpretedCallable) return InterpretedRouteSpec(builder);
         throw PreviewRuntimeException('MaterialPageRoute يحتاج builder صالح');
 
+      case 'showDialog':
+        final (_, named) = _evalArgs(expr, scope);
+        final dialogContext = named['context'];
+        final dialogBuilder = named['builder'];
+        if (dialogContext is! BuildContext) {
+          throw PreviewRuntimeException('showDialog يحتاج context: صالحًا.');
+        }
+        if (dialogBuilder is! InterpretedCallable) {
+          throw PreviewRuntimeException('showDialog يحتاج builder: صالحًا.');
+        }
+        showDialog<void>(context: dialogContext, builder: (ctx) => dialogBuilder.asContextBuilder(ctx));
+        return null;
+
       default:
         if (classRegistry.containsKey(name)) {
           return _instantiateUserClass(name, expr, scope);
@@ -436,7 +497,11 @@ class Interpreter {
         }
         final widget = BuiltinWidgets.build(name, pos, named);
         if (widget != null) return widget;
-        return _errorWidget('عنصر غير مدعوم بعد: $name');
+        return _errorWidget(
+          'الصنف/الودجت "$name" غير معروف: ليس صنفًا معرَّفًا في مشروعكم، وليس '
+          'مُسجَّلًا في قائمة الودجتس المدعومة (builtin_widgets.dart)، ولا يوجد '
+          'باسم هذا دالة مساعدة في الصنف الحالي.',
+        );
     }
   }
 
@@ -465,6 +530,14 @@ class Interpreter {
       }
     }
 
+    if (namespace == 'ScaffoldMessenger' && member == 'of') {
+      final context = expr.positionalArgs.isNotEmpty ? _eval(expr.positionalArgs.first, scope) : null;
+      if (context is! BuildContext) {
+        throw PreviewRuntimeException('ScaffoldMessenger.of() يتطلّب BuildContext صالحًا كوسيط أول.');
+      }
+      return _ScaffoldMessengerRef(context);
+    }
+
     final composedName = '$namespace.$member';
     final (pos, named) = _evalArgs(expr, scope);
     if (BuiltinWidgets.valueConstructors.contains(composedName)) {
@@ -472,7 +545,10 @@ class Interpreter {
     }
     final widget = BuiltinWidgets.build(composedName, pos, named);
     if (widget != null) return widget;
-    return _errorWidget('عنصر غير مدعوم بعد: $composedName');
+    return _errorWidget(
+      'العنصر "$composedName" غير مُسجَّل في قائمة الودجتس/القيم المدعومة '
+      '(builtin_widgets.dart) — تحقّقوا من الاسم، أو أضيفوه يدويًا إن كان مطلوبًا فعليًا.',
+    );
   }
 
   /// ينشئ نسخة من صنف مُعرَّف داخل المشروع (StatelessWidget، أو الزوج
@@ -538,6 +614,7 @@ class Interpreter {
   /// يسمح بمتغيرات محلية/حلقات/شروط قبل الجملة الأخيرة، ويلتقط أول
   /// [_ReturnSignal] كناتج نهائي، تمامًا كأي دالة مساعدة أخرى.
   Widget _runBuild(WidgetClassDef def, RuntimeScope buildScope) {
+    _currentFile = def.sourceFile ?? _currentFile;
     if (def.buildBody == null) {
       final reason = def.buildParseError ??
           'لا توجد دالة build في هذا الصنف (طبيعي لأصناف StatefulWidget نفسها؛ تحقّق من صنف State المرتبط به).';
@@ -582,6 +659,7 @@ class Interpreter {
   // ------------------------- Statement execution -------------------------
 
   void _exec(Stmt stmt, RuntimeScope scope) {
+    if (stmt.line > 0) _currentLine = stmt.line;
     if (stmt is ExprStmt) {
       _eval(stmt.expr, scope);
       return;

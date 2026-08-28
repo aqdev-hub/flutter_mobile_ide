@@ -270,10 +270,75 @@ class BuiltinWidgets {
         );
 
       case 'Divider':
-        return const Divider();
+        return Divider(
+          color: arg('color') as Color?,
+          thickness: (arg('thickness') as num?)?.toDouble(),
+          height: (arg('height') as num?)?.toDouble(),
+        );
 
       case 'VerticalDivider':
-        return const VerticalDivider();
+        return VerticalDivider(
+          color: arg('color') as Color?,
+          thickness: (arg('thickness') as num?)?.toDouble(),
+          width: (arg('width') as num?)?.toDouble(),
+        );
+
+      case 'Opacity':
+        return Opacity(
+          opacity: (arg('opacity', 0) as num?)?.toDouble() ?? 1.0,
+          child: arg('child') as Widget?,
+        );
+
+      case 'Visibility':
+        return Visibility(
+          visible: arg('visible', 0) as bool? ?? true,
+          child: arg('child') as Widget? ?? const SizedBox(),
+        );
+
+      case 'AspectRatio':
+        return AspectRatio(
+          aspectRatio: (arg('aspectRatio') as num?)?.toDouble() ?? 1.0,
+          child: arg('child') as Widget?,
+        );
+
+      case 'FractionallySizedBox':
+        return FractionallySizedBox(
+          widthFactor: (arg('widthFactor') as num?)?.toDouble(),
+          heightFactor: (arg('heightFactor') as num?)?.toDouble(),
+          child: arg('child') as Widget?,
+        );
+
+      case 'Hero':
+        return Hero(
+          tag: arg('tag', 0) ?? '',
+          child: arg('child') as Widget? ?? const SizedBox(),
+        );
+
+      // --- حوارات وإشعارات ---
+      case 'SnackBar':
+        return SnackBar(
+          content: arg('content') as Widget? ?? const Text(''),
+          backgroundColor: arg('backgroundColor') as Color?,
+          duration: arg('duration') as Duration? ?? const Duration(seconds: 4),
+        );
+
+      case 'AlertDialog':
+        return AlertDialog(
+          title: arg('title') as Widget?,
+          content: arg('content') as Widget?,
+          actions: (arg('actions') as List?)?.cast<Widget>(),
+        );
+
+      // --- قوائم منسدلة (مبسّطة: بدون Generics حقيقية) ---
+      case 'DropdownButton':
+        return DropdownButton<dynamic>(
+          value: arg('value'),
+          items: (arg('items') as List?)?.cast<DropdownMenuItem<dynamic>>(),
+          onChanged: (v) {
+            final cb = arg('onChanged');
+            if (cb is InterpretedCallable) cb.call([v]);
+          },
+        );
 
       case 'SingleChildScrollView':
         return SingleChildScrollView(
@@ -548,9 +613,24 @@ class BuiltinWidgets {
         // widget_interpreter.dart لتفاصيل الدعم المحدود لتوابعه).
         return TextEditingController(text: arg('text') as String? ?? '');
       case 'OutlineInputBorder':
-        return const OutlineInputBorder();
+        return OutlineInputBorder(
+          borderSide: arg('borderSide') as BorderSide? ?? const BorderSide(),
+          borderRadius: arg('borderRadius') as BorderRadius? ?? const BorderRadius.all(Radius.circular(4)),
+        );
       case 'UnderlineInputBorder':
-        return const UnderlineInputBorder();
+        return UnderlineInputBorder(
+          borderSide: arg('borderSide') as BorderSide? ?? const BorderSide(),
+        );
+      case 'BorderSide':
+        return BorderSide(
+          color: arg('color') as Color? ?? Colors.black,
+          width: (arg('width') as num?)?.toDouble() ?? 1.0,
+        );
+      case 'DropdownMenuItem':
+        return DropdownMenuItem<dynamic>(
+          value: arg('value'),
+          child: arg('child') as Widget? ?? const SizedBox(),
+        );
       default:
         return null;
     }
@@ -607,6 +687,12 @@ class BuiltinWidgets {
     'Icons.local_shipping': Icons.local_shipping, 'Icons.credit_card': Icons.credit_card,
     'Icons.attach_money': Icons.attach_money, 'Icons.language': Icons.language,
     'Icons.dark_mode': Icons.dark_mode, 'Icons.light_mode': Icons.light_mode,
+    'Icons.done': Icons.done, 'Icons.cancel': Icons.cancel, 'Icons.save': Icons.save,
+    'Icons.dashboard': Icons.dashboard, 'Icons.list': Icons.list, 'Icons.grid_view': Icons.grid_view,
+    'Icons.bar_chart': Icons.bar_chart, 'Icons.pie_chart': Icons.pie_chart,
+    'Icons.timeline': Icons.timeline, 'Icons.print': Icons.print, 'Icons.qr_code': Icons.qr_code,
+    'Icons.bookmark': Icons.bookmark, 'Icons.bookmark_border': Icons.bookmark_border,
+    'Icons.flag': Icons.flag, 'Icons.report': Icons.report,
 
     // ---- FontWeight ----
     'FontWeight.bold': FontWeight.bold, 'FontWeight.normal': FontWeight.normal,
@@ -659,6 +745,6 @@ class BuiltinWidgets {
     'BorderRadius.circular', 'BorderRadius.only', 'Border.all', 'BoxShadow',
     'Offset', 'Duration', 'SliverGridDelegateWithFixedCrossAxisCount',
     'BottomNavigationBarItem', 'Color', 'TextEditingController',
-    'OutlineInputBorder', 'UnderlineInputBorder',
+    'OutlineInputBorder', 'UnderlineInputBorder', 'BorderSide', 'DropdownMenuItem',
   };
 }

@@ -24,6 +24,7 @@ class InterpolationExpr extends Expr {
 
 class IdentifierExpr extends Expr {
   final String name;
+  int line = 0;
   IdentifierExpr(this.name);
 }
 
@@ -70,6 +71,10 @@ class CallExpr extends Expr {
   final Expr callee;
   final List<Expr> positionalArgs;
   final Map<String, Expr> namedArgs;
+  // رقم السطر الذي بدأ عنده هذا الاستدعاء — يمنح دقة أعلى من رقم سطر
+  // الجملة المحيطة وحدها، مهم خصوصًا لأن جملة return واحدة قد تحتوي شجرة
+  // ودجتس متشعبة بالكامل على عدة أسطر.
+  int line = 0;
   CallExpr(this.callee, this.positionalArgs, this.namedArgs) : id = _nextId++;
 }
 
@@ -113,7 +118,13 @@ class IndexExpr extends Expr {
 
 // ------------------------- Statements -------------------------
 
-abstract class Stmt {}
+/// [line]: رقم السطر الذي بدأت عنده هذه الجملة داخل ملفها المصدري — يُملأ
+/// تلقائيًا من المُحلِّل اللفظي عبر [DartSubsetParser._statement], ويُستخدَم
+/// وقت التشغيل لتحديد "الموضع الحالي" في رسائل الخطأ (راجع نظام الأخطاء
+/// الموحَّد في Interpreter._currentLine/_currentFile).
+abstract class Stmt {
+  int line = 0;
+}
 
 class ExprStmt extends Stmt {
   final Expr expr;
@@ -208,11 +219,10 @@ class WidgetClassDef {
   final List<FieldDecl> fields;
   final List<Stmt>? buildBody;
   final List<MethodDef> methods;
-  // السبب الحقيقي لفشل تحليل build (إن فشل) — يُستخدَم لعرض رسالة خطأ دقيقة
-  // بدل رسالة عامة "تعذّر تحليل build" لا تشرح السبب الفعلي. null يعني إما
-  // نجاح التحليل، أو عدم وجود build إطلاقًا في هذا الصنف (طبيعي لأصناف
-  // StatefulWidget التي تُعرَّف build في صنف State المرتبط بها لا هنا).
   final String? buildParseError;
+  // اسم الملف (وليس المسار الكامل عادة) الذي عُرِّف فيه هذا الصنف — يُستخدَم
+  // في تنسيق موضع الخطأ الموحَّد "اسم_الملف.dart — السطر N".
+  final String? sourceFile;
 
   WidgetClassDef({
     required this.name,
@@ -222,5 +232,6 @@ class WidgetClassDef {
     this.buildBody,
     this.methods = const [],
     this.buildParseError,
+    this.sourceFile,
   });
 }

@@ -2,9 +2,10 @@ import 'dart_subset_ast.dart';
 
 class ParseException implements Exception {
   final String message;
-  ParseException(this.message);
+  final int? line;
+  ParseException(this.message, {this.line});
   @override
-  String toString() => 'خطأ تحليل: $message';
+  String toString() => line != null ? 'خطأ تحليل (السطر $line): $message' : 'خطأ تحليل: $message';
 }
 
 enum _TokType { identifier, string, number, symbol, eof }
@@ -13,7 +14,8 @@ class _Token {
   final _TokType type;
   final String text;
   final Object? value; // للنصوص المحتوية على أجزاء تفاعلية (InterpolationExpr)
-  _Token(this.type, this.text, [this.value]);
+  final int line; // رقم السطر (1-based) — يُستخدَم لملء Stmt.line/CallExpr.line/IdentifierExpr.line
+  _Token(this.type, this.text, this.line, [this.value]);
 }
 
 const _kSymbols = [
@@ -28,6 +30,7 @@ const _kSymbols = [
 class _Lexer {
   final String src;
   int pos = 0;
+  int line = 1; // رقم السطر الحالي (1-based)، يزداد عند كل حرف سطر جديد
   _Lexer(this.src);
 
   List<_Token> tokenize() {
@@ -36,30 +39,34 @@ class _Lexer {
       _skipWhitespaceAndComments();
       if (pos >= src.length) break;
       final ch = src[pos];
+      final startLine = line;
 
       if (ch == '"' || ch == "'") {
-        tokens.add(_readString(ch));
+        tokens.add(_readString(ch, startLine));
         continue;
       }
       if (RegExp(r'[0-9]').hasMatch(ch)) {
-        tokens.add(_readNumber());
+        tokens.add(_readNumber(startLine));
         continue;
       }
       if (RegExp(r'[A-Za-z_$]').hasMatch(ch)) {
-        tokens.add(_readIdentifier());
+        tokens.add(_readIdentifier(startLine));
         continue;
       }
       final symbol = _readSymbol();
-      tokens.add(_Token(_TokType.symbol, symbol));
+      tokens.add(_Token(_TokType.symbol, symbol, startLine));
     }
-    tokens.add(_Token(_TokType.eof, ''));
+    tokens.add(_Token(_TokType.eof, '', line));
     return tokens;
   }
 
   void _skipWhitespaceAndComments() {
     while (pos < src.length) {
       final ch = src[pos];
-      if (ch == ' ' || ch == '\n' || ch == '\t' || ch == '\r') {
+      if (ch == '\n') {
+        line++;
+        pos++;
+      } else if (ch == ' ' || ch == '\t' || ch == '\r') {
         pos++;
       } else if (ch == '/' && pos + 1 < src.length && src[pos + 1] == '/') {
         while (pos < src.length && src[pos] != '\n') {
@@ -71,7 +78,7 @@ class _Lexer {
     }
   }
 
-  _Token _readNumber() {
+  _Token _readNumber(int startLine) {
     final start = pos;
     // دعم الصيغة السداسية عشرية: 0x.../0X... — بدونها كانت 0xFFE3F2FD
     // تُقرأ كرمزين مكسورين ("0" ثم مُعرِّف "xFFE3F2FD")، وهو السبب الجذري
@@ -81,20 +88,20 @@ class _Lexer {
       while (pos < src.length && RegExp(r'[0-9a-fA-F]').hasMatch(src[pos])) {
         pos++;
       }
-      return _Token(_TokType.number, src.substring(start, pos));
+      return _Token(_TokType.number, src.substring(start, pos), startLine);
     }
     while (pos < src.length && RegExp(r'[0-9.]').hasMatch(src[pos])) {
       pos++;
     }
-    return _Token(_TokType.number, src.substring(start, pos));
+    return _Token(_TokType.number, src.substring(start, pos), startLine);
   }
 
-  _Token _readIdentifier() {
+  _Token _readIdentifier(int startLine) {
     final start = pos;
     while (pos < src.length && RegExp(r'[A-Za-z0-9_$]').hasMatch(src[pos])) {
       pos++;
     }
-    return _Token(_TokType.identifier, src.substring(start, pos));
+    return _Token(_TokType.identifier, src.substring(start, pos), startLine);
   }
 
   String _readSymbol() {
@@ -109,11 +116,12 @@ class _Lexer {
     return '';
   }
 
-  _Token _readString(String quote) {
+  _Token _readString(String quote, int startLine) {
     pos++; // تجاوز علامة الاقتباس الافتتاحية
     final parts = <Object>[];
     final buffer = StringBuffer();
     while (pos < src.length && src[pos] != quote) {
+      if (src[pos] == '\n') line++; // نادر لكن ممكن (نص متعدد الأسطر بالخطأ)
       if (src[pos] == r'$' && pos + 1 < src.length && src[pos + 1] == '{') {
         if (buffer.isNotEmpty) {
           parts.add(buffer.toString());
@@ -140,7 +148,7 @@ class _Lexer {
         while (pos < src.length && RegExp(r'[A-Za-z0-9_]').hasMatch(src[pos])) {
           pos++;
         }
-        parts.add(IdentifierExpr(src.substring(start, pos)));
+        parts.add(IdentifierExpr(src.substring(start, pos))..line = startLine);
       } else if (src[pos] == '\\' && pos + 1 < src.length) {
         buffer.write(src[pos + 1]);
         pos += 2;
@@ -151,7 +159,7 @@ class _Lexer {
     }
     if (buffer.isNotEmpty) parts.add(buffer.toString());
     pos++; // تجاوز علامة الاقتباس الختامية
-    return _Token(_TokType.string, '', parts);
+    return _Token(_TokType.string, '', startLine, parts);
   }
 }
 
@@ -199,14 +207,24 @@ class DartSubsetParser {
 
   _Token _expect(String text) {
     if (!_match(text)) {
-      throw ParseException('متوقَّع "$text" لكن وُجد "${_current.text}"');
+      throw ParseException('متوقَّع "$text" لكن وُجد "${_current.text}"', line: _current.line);
     }
     return _tokens[pos - 1];
   }
 
   // ------------------------- Statements -------------------------
 
+  /// يلتقط رقم السطر عند بداية أي جملة ويُسجِّله على الكائن الناتج — بهذا
+  /// الشكل تحصل كل أنواع الجُمل على تتبّع سطر تلقائيًا بدون تعديل كل فرع
+  /// من فروع _statementInner على حدة.
   Stmt _statement() {
+    final startLine = _current.line;
+    final stmt = _statementInner();
+    stmt.line = startLine;
+    return stmt;
+  }
+
+  Stmt _statementInner() {
     if (_match('if')) return _ifStatement();
     if (_match('for')) return _forStatement();
     if (_match('while')) return _whileStatement();
@@ -414,19 +432,20 @@ class DartSubsetParser {
   }
 
   Expr _postfix() {
+    final startLine = _current.line;
     var expr = _primary();
     while (true) {
       if (_match('.')) {
         final name = _advance().text;
         if (_check(_TokType.symbol, '(')) {
           final (positional, named) = _argumentList();
-          expr = CallExpr(PropertyExpr(expr, name), positional, named);
+          expr = CallExpr(PropertyExpr(expr, name), positional, named)..line = startLine;
         } else {
           expr = PropertyExpr(expr, name);
         }
       } else if (_check(_TokType.symbol, '(')) {
         final (positional, named) = _argumentList();
-        expr = CallExpr(expr, positional, named);
+        expr = CallExpr(expr, positional, named)..line = startLine;
       } else if (_match('[')) {
         final index = _expression();
         _expect(']');
@@ -534,11 +553,11 @@ class DartSubsetParser {
     }
 
     if (_check(_TokType.identifier)) {
-      final name = _advance().text;
-      return IdentifierExpr(name);
+      final token = _advance();
+      return IdentifierExpr(token.text)..line = token.line;
     }
 
-    throw ParseException('تعبير غير متوقَّع: "${_current.text}"');
+    throw ParseException('تعبير غير متوقَّع: "${_current.text}"', line: _current.line);
   }
 
   /// عنصر collection-for داخل قائمة: `for (var x in items) elementExpr`.
@@ -550,7 +569,7 @@ class DartSubsetParser {
     _match('var');
     final varName = _advance().text;
     if (!_match('in')) {
-      throw ParseException('صيغة for داخل قائمة تتطلب "in" (نمط for-in فقط مدعوم هنا)');
+      throw ParseException('صيغة for داخل قائمة تتطلب "in" (نمط for-in فقط مدعوم هنا)', line: _current.line);
     }
     final iterable = _expression();
     _expect(')');
