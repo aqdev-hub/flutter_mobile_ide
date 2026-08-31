@@ -18,10 +18,18 @@ class PreviewPanel extends ConsumerWidget {
           PreviewStatus.idle => const _IdlePreview(),
           PreviewStatus.error => _ErrorPreview(message: previewState.errorMessage ?? 'خطأ غير معروف'),
           PreviewStatus.running => _DeviceFrame(
-              // مفتاح فريد يتغيّر مع rebuildTick لضمان إعادة بناء الشجرة كاملة
-              // عند كل setState، بدل الاعتماد على مقارنة Widget تلقائية قد
-              // تُخفي تحديثات لا يلتقطها Flutter دون مفتاح صريح.
-              key: ValueKey(previewState.rebuildTick),
+              // ⚠️ لا يوجد أي مفتاح (Key) قسري هنا عمدًا — كان موجودًا سابقًا
+              // (ValueKey(rebuildTick)) بهدف إجبار إعادة البناء، لكنه كان
+              // السبب الجذري لمشكلة حقيقية: أي setState داخل شاشة فرعية
+              // مفتوحة عبر Navigator.push كان يُهدم شجرة Navigator بالكامل
+              // ويُعيد إنشاءها من الصفر (لأن تغيّر المفتاح يجعل Flutter
+              // يتعامل مع الشجرة كعنصر جديد كليًا لا عنصر يُحدَّث)، فتفقد
+              // Navigator مسارها الحالي — وهذا بالضبط ما بدا وكأن "الشاشة
+              // الفرعية لا تتحدث فورًا" رغم أن القيمة كانت تتغيّر بالفعل.
+              // بدون هذا المفتاح، تُعاد شجرة widgets **جديدة فعليًا** من
+              // buildRoot() (بما يعكس القيم المحدَّثة)، لكن Flutter يُحدِّث
+              // العناصر الحالية في مكانها بدل هدمها، فتُحافَظ حالة Navigator
+              // الداخلية تلقائيًا.
               child: Builder(
                 builder: (innerContext) =>
                     previewState.interpreter!.buildRoot(previewState.rootExpr!, innerContext),

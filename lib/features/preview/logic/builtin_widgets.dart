@@ -658,6 +658,12 @@ class BuiltinWidgets {
 
     // ---- Icons (أساسية) ----
     'Icons.add': Icons.add, 'Icons.remove': Icons.remove, 'Icons.home': Icons.home,
+    'Icons.add_circle_outline': Icons.add_circle_outline, 'Icons.add_circle': Icons.add_circle,
+    'Icons.remove_circle_outline': Icons.remove_circle_outline, 'Icons.remove_circle': Icons.remove_circle,
+    'Icons.check_circle_outline': Icons.check_circle_outline, 'Icons.check_circle': Icons.check_circle,
+    'Icons.cancel_outlined': Icons.cancel_outlined, 'Icons.info_outlined': Icons.info_outlined,
+    'Icons.error_outline': Icons.error_outline, 'Icons.warning_outlined': Icons.warning_outlined,
+    'Icons.circle_outlined': Icons.circle_outlined, 'Icons.circle': Icons.circle,
     'Icons.menu': Icons.menu, 'Icons.settings': Icons.settings, 'Icons.search': Icons.search,
     'Icons.close': Icons.close, 'Icons.arrow_back': Icons.arrow_back,
     'Icons.arrow_forward': Icons.arrow_forward, 'Icons.favorite': Icons.favorite,

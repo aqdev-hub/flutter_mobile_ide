@@ -227,6 +227,23 @@ class Interpreter {
             result.add(_eval(element.element, loopScope));
             index++;
           }
+        } else if (element is ListClassicForElement) {
+          // for الكلاسيكية داخل قائمة — نفس منطق _execFor للجُمل العادية،
+          // لكن نجمع ناتج كل تكرار في result بدل تنفيذ جُمل.
+          final loopScope = RuntimeScope(fields: scope.fields, methods: scope.methods, parent: scope);
+          if (element.init != null) _exec(element.init!, loopScope);
+          var iteration = 0;
+          while (element.condition == null || (_eval(element.condition!, loopScope) as bool)) {
+            final iterScope = RuntimeScope(
+              fields: loopScope.fields,
+              methods: loopScope.methods,
+              instancePath: [...scope.instancePath, 'listforclassic:$iteration'],
+              parent: loopScope,
+            );
+            result.add(_eval(element.element, iterScope));
+            if (element.increment != null) _exec(element.increment!, loopScope);
+            iteration++;
+          }
         } else {
           result.add(_eval(element as Expr, scope));
         }
@@ -357,6 +374,15 @@ class Interpreter {
 
   String _stringify(dynamic value) => value == null ? '' : value.toString();
 
+  // أسماء مساحات الثوابت المعروفة — تُستخدَم لتمييز "Icons.xxx غير مسجَّلة"
+  // عن "xxx متغيّر حقيقي غير معروف"، حتى تكون رسالة الخطأ دقيقة ومفيدة.
+  static const Set<String> _knownStaticNamespaces = {
+    'Colors', 'Icons', 'FontWeight', 'MainAxisAlignment', 'CrossAxisAlignment',
+    'MainAxisSize', 'TextAlign', 'FontStyle', 'Alignment', 'BoxShape', 'Axis',
+    'WrapAlignment', 'FlexFit', 'BoxFit', 'TextDecoration', 'TextOverflow',
+    'BottomNavigationBarType', 'InputBorder',
+  };
+
   dynamic _evalProperty(PropertyExpr expr, RuntimeScope scope) {
     // مسار static معروف مسبقًا: Colors.red / Icons.add / FontWeight.bold ...
     if (expr.target is IdentifierExpr) {
@@ -365,6 +391,16 @@ class Interpreter {
         final composed = '$targetName.${expr.name}';
         if (BuiltinWidgets.staticProperties.containsKey(composed)) {
           return BuiltinWidgets.staticProperties[composed];
+        }
+        // كنا هنا سابقًا نسقط مباشرة لتقييم "targetName" كمتغيّر عادي، فتظهر
+        // رسالة مُضلِّلة مثل "متغيّر غير معروف: Icons" — بينما المشكلة
+        // الحقيقية أن "add_circle_outline" تحديدًا غير مُسجَّلة، وليست
+        // Icons نفسها. الآن نميّز الحالتين بوضوح.
+        if (_knownStaticNamespaces.contains(targetName)) {
+          throw PreviewRuntimeException(
+            'الخاصية "$composed" غير مُسجَّلة في قائمة الثوابت المدعومة — '
+            'تحقّقوا من الاسم، أو أضيفوها يدويًا في builtin_widgets.dart (staticProperties).',
+          );
         }
       }
     }

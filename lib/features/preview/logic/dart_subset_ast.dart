@@ -29,9 +29,7 @@ class IdentifierExpr extends Expr {
 }
 
 /// عنصر "for" داخل قائمة (collection-for) — مثل:
-/// `[for (var item in items) Text(item)]`. مدعوم فقط بصيغة for-in (وليس
-/// for الكلاسيكية بثلاثة أجزاء) لأنها الحالة الشائعة فعليًا لبناء children
-/// ديناميكيًا في أشجار الودجتس.
+/// `[for (var item in items) Text(item)]`.
 class ListForElement {
   final String varName;
   final Expr iterable;
@@ -39,8 +37,20 @@ class ListForElement {
   ListForElement(this.varName, this.iterable, this.element);
 }
 
+/// عنصر "for" كلاسيكية بثلاثة أجزاء داخل قائمة — مثل:
+/// `[for (var i = 0; i < 4; i = i + 1) Text('$i')]`. مكمِّلة لـ
+/// [ListForElement] (for-in) — كلا الصيغتين مدعومتان الآن داخل collections.
+class ListClassicForElement {
+  final Stmt? init;
+  final Expr? condition;
+  final Stmt? increment;
+  final Expr element;
+  ListClassicForElement(this.init, this.condition, this.increment, this.element);
+}
+
 class ListExpr extends Expr {
-  // كل عنصر إمّا Expr مباشر أو ListForElement (collection-for).
+  // كل عنصر إمّا Expr مباشر، أو ListForElement (for-in)، أو
+  // ListClassicForElement (for الكلاسيكية).
   final List<Object> elements;
   ListExpr(this.elements);
 }

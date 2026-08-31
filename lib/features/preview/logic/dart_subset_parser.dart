@@ -561,19 +561,43 @@ class DartSubsetParser {
   }
 
   /// عنصر collection-for داخل قائمة: `for (var x in items) elementExpr`.
-  /// مدعوم فقط بصيغة for-in (الحالة العملية لبناء children ديناميكيًا) —
-  /// وليس for الكلاسيكية بثلاثة أجزاء، ولا شرط `if` مصاحب.
-  ListForElement _collectionForElement() {
+  /// يدعم الآن صيغتين، بنفس منطق التمييز المُستخدَم في _forStatement للجُمل
+  /// العادية: for-in (`for (var x in items) element`) وfor الكلاسيكية
+  /// (`for (var i = 0; i < n; i = i + 1) element`).
+  Object _collectionForElement() {
     _expect('(');
-    _match('final');
-    _match('var');
-    final varName = _advance().text;
-    if (!_match('in')) {
-      throw ParseException('صيغة for داخل قائمة تتطلب "in" (نمط for-in فقط مدعوم هنا)', line: _current.line);
+
+    final startPos = pos;
+    var lookahead = pos;
+    if (_tokens[lookahead].type == _TokType.identifier &&
+        (_tokens[lookahead].text == 'final' || _tokens[lookahead].text == 'var')) {
+      lookahead++;
     }
-    final iterable = _expression();
+    if (_tokens[lookahead].type == _TokType.identifier &&
+        lookahead + 1 < _tokens.length &&
+        _tokens[lookahead + 1].type == _TokType.identifier &&
+        _tokens[lookahead + 1].text == 'in') {
+      final varName = _tokens[lookahead].text;
+      pos = lookahead + 2; // تجاوز الاسم و'in'
+      final iterable = _expression();
+      _expect(')');
+      final element = _expression();
+      return ListForElement(varName, iterable, element);
+    }
+
+    // لم تكن for-in — نعيد المؤشر ونحلّلها كـ for كلاسيكية بثلاثة أجزاء.
+    pos = startPos;
+    Stmt? init;
+    if (!_check(_TokType.symbol, ';')) {
+      init = _statement(); // تستهلك الفاصلة المنقوطة تلقائيًا
+    } else {
+      _match(';');
+    }
+    final condition = _check(_TokType.symbol, ';') ? null : _expression();
+    _expect(';');
+    final increment = _check(_TokType.symbol, ')') ? null : _expressionOrAssignStatement();
     _expect(')');
     final element = _expression();
-    return ListForElement(varName, iterable, element);
+    return ListClassicForElement(init, condition, increment, element);
   }
 }
