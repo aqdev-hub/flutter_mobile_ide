@@ -2,9 +2,12 @@
 /// مُفسِّر المعاينة الحي. راجع README (قسم "حدود المُفسِّر") لمعرفة ما هو
 /// مدعوم فعليًا وما هو خارج هذا الإصدار.
 ///
-/// **تحديث**: أُضيفت عقد for/while/break/continue ودوال مساعدة متعددة داخل
-/// الصنف — أول خطوة من خارطة التوسّع الموثَّقة في README (كانت هذه أبرز
-/// أسباب رفض كود Dart سليم سابقًا).
+/// **تحديث سابق**: أُضيفت عقد for/while/break/continue ودوال مساعدة متعددة
+/// داخل الصنف.
+///
+/// **تحديث جديد**: أُضيف [AwaitExpr] + علم `isAsync` على [MethodDef] و
+/// [LambdaExpr] — دعم مبسَّط لِـ async/await (راجع التوثيق الكامل لحدود هذا
+/// الدعم في widget_interpreter.dart، قسم "دعم async/await المبسَّط").
 library dart_subset_ast;
 
 // ------------------------- Expressions -------------------------
@@ -74,7 +77,8 @@ class MapExpr extends Expr {
 /// البناء المتتالية بعد setState، لأن الشجرة نفسها لا تُعاد تحليلها إلا عند
 /// "إعادة تشغيل" كاملة). يُستخدم هذا المعرّف لبناء مفتاح هوية كل نسخة
 /// StatefulWidget — راجع التوثيق في widget_interpreter.dart لدعم "نسخ
-/// متعددة نشطة من نفس الصنف".
+/// متعددة نشطة من نفس الصنف" وآلية إعادة الرسم المحلية الحقيقية عبر
+/// InterpretedStatefulHost.
 class CallExpr extends Expr {
   static int _nextId = 0;
   final int id;
@@ -97,7 +101,10 @@ class PropertyExpr extends Expr {
 class LambdaExpr extends Expr {
   final List<String> params;
   final List<Stmt> body;
-  LambdaExpr(this.params, this.body);
+  // هل هذه الدالة اللامدا مُعلَّمة `async`؟ — تُنفَّذ عبر مسار تنفيذ مختلف
+  // (_invokeLambdaAsync) يدعم await كطرف كامل لجملة (راجع widget_interpreter.dart).
+  final bool isAsync;
+  LambdaExpr(this.params, this.body, {this.isAsync = false});
 }
 
 class BinaryExpr extends Expr {
@@ -124,6 +131,15 @@ class IndexExpr extends Expr {
   final Expr target;
   final Expr index;
   IndexExpr(this.target, this.index);
+}
+
+/// تعبير `await` — **مدعوم فقط كطرف أعلى مباشر لجملة كاملة** (مثل
+/// `await x;`، أو `var y = await x;`، أو `return await x;`)، وليس متداخلًا
+/// داخل تعبير أكبر (`1 + await x` غير مدعوم). راجع التوثيق الكامل لحدود دعم
+/// async/await في widget_interpreter.dart.
+class AwaitExpr extends Expr {
+  final Expr inner;
+  AwaitExpr(this.inner);
 }
 
 // ------------------------- Statements -------------------------
@@ -212,11 +228,16 @@ class FieldDecl {
 /// `Widget _buildRow(String label) { ... }`. تُستدعى من داخل build (أو من
 /// دالة مساعدة أخرى بنفس الصنف) كاستدعاء عادي بالاسم، وتُنفَّذ بنفس آلية
 /// تنفيذ build (قائمة جُمل + التقاط ReturnStmt الأخير كناتج).
+///
+/// [isAsync]: هل عُرِّفت هذه الدالة بـ `async` (مثل
+/// `Future<void> _loadData() async { ... }`)؟ إن كانت كذلك، تُنفَّذ عبر
+/// مسار تنفيذ مختلف (_invokeMethodAsync) يدعم await المبسَّط.
 class MethodDef {
   final String name;
   final List<String> params;
   final List<Stmt> body;
-  MethodDef(this.name, this.params, this.body);
+  final bool isAsync;
+  MethodDef(this.name, this.params, this.body, {this.isAsync = false});
 }
 
 /// تمثيل مبسّط لصنف Widget مستخرَج من الكود المصدري: اسمه، حقوله (إن وُجدت

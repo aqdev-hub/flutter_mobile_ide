@@ -15,7 +15,9 @@ class ExtractionIssue {
 /// - اسم الصنف والصنف الأب (StatelessWidget / StatefulWidget / State<X>)
 /// - حقول بسيطة declarations مثل `int _counter = 0;`
 /// - جسم دالة build كاملًا (قائمة جُمل)
-/// - دوال مساعدة أخرى مُعرَّفة داخل نفس الصنف (غير build/createState)
+/// - دوال مساعدة أخرى مُعرَّفة داخل نفس الصنف (غير build/createState)، بما
+///   فيها الدوال المُعلَّمة `async` (راجع دعم async/await المبسَّط في
+///   widget_interpreter.dart)
 ///
 /// **تحديث**: كل خلل استخراج (كان يُسجَّل سابقًا عبر print() صامت لا يصل
 /// للمستخدم إطلاقًا) يُجمَع الآن في [issues] — هذه هي القائمة التي يعرضها
@@ -155,6 +157,11 @@ class ClassExtractor {
   /// شروط قبل الجملة الأخيرة return). يُعيد أيضًا رسالة الخطأ الحقيقية عند
   /// الفشل (بدل الاكتفاء بـ null) حتى تظهر للمستخدم أثناء التشغيل الفعلي،
   /// وليس فقط في تبويب Problems.
+  ///
+  /// **ملاحظة**: build لا يمكن أن تكون async في Flutter الحقيقي (يجب أن
+  /// تُعيد Widget تزامنيًا) — لذا لا حاجة لدعم async هنا عمدًا؛ إن كتب
+  /// المستخدم `Widget build(...) async {...}` بالخطأ فلن تُطابَق الصياغة
+  /// (نفس ما يرفضه محلّل Dart الحقيقي أيضًا).
   (List<Stmt>?, String?) _extractBuildBody(String classBody, int bodyStart, String className) {
     final arrowMatch =
         RegExp(r'Widget\s+build\s*\(\s*BuildContext\s+\w+\s*\)\s*=>').firstMatch(classBody);
@@ -214,18 +221,21 @@ class ClassExtractor {
 
   /// يستخرج كل الدوال المُعرَّفة داخل الصنف عدا build/createState.
   ///
-  /// **إصلاح جوهري**: كنا سابقًا نفحص النص الكامل غير المُقنَّع بحثًا عن نمط
-  /// "اسم(معاملات) {"، وهذا كان يلتقط أي إغلاق (closure) متداخل داخل build
-  /// (أشيعها: `setState(() { ... })`) ويُسجِّله خطأً كدالة مساعدة على مستوى
-  /// الصنف، بحدود أقواس مُلتقَطة من موضع خاطئ تمامًا — ما كان يُفسد سجلّ
-  /// الدوال بطرق غير متوقعة (ومنها على الأرجح خطأ "value غير معروف" الذي
-  /// ظهر أثناء الاختبار). الآن نتحقق أن كل مطابقة تبدأ عند "المستوى صفر"
-  /// من الصنف فعليًا (خارج أي {} متداخل بالفعل) قبل قبولها.
+  /// **تحديث**: يدعم الآن اكتشاف `async` بعد قوس المعاملات (مثل
+  /// `Future<void> _loadData() async { ... }`) عبر مجموعة التقاط إضافية في
+  /// الـ regex، ويُمرَّر هذا كعلم [MethodDef.isAsync] ليُنفَّذ لاحقًا عبر
+  /// مسار تنفيذ async مخصَّص في المُفسِّر (راجع widget_interpreter.dart).
+  ///
+  /// **إصلاح جوهري سابق**: كنا سابقًا نفحص النص الكامل غير المُقنَّع بحثًا عن
+  /// نمط "اسم(معاملات) {"، وهذا كان يلتقط أي إغلاق (closure) متداخل داخل
+  /// build (أشيعها: `setState(() { ... })`) ويُسجِّله خطأً كدالة مساعدة على
+  /// مستوى الصنف. الآن نتحقق أن كل مطابقة تبدأ عند "المستوى صفر" من الصنف
+  /// فعليًا (خارج أي {} متداخل بالفعل) قبل قبولها.
   List<MethodDef> _extractMethods(String classBody, int bodyStart, String className) {
     final methods = <MethodDef>[];
     final depthAt = _computeDepthAtEachPosition(classBody);
     final methodRegex = RegExp(
-      r'(?:^|\n)[ \t]*(?:[\w<>?\[\],\s]+?)\s+(_?\w+)\s*\(([^)]*)\)\s*(\{|=>)',
+      r'(?:^|\n)[ \t]*(?:[\w<>?\[\],\s]+?)\s+(_?\w+)\s*\(([^)]*)\)\s*(async\s*)?(\{|=>)',
       multiLine: true,
     );
     for (final match in methodRegex.allMatches(classBody)) {
@@ -237,7 +247,8 @@ class ClassExtractor {
       if (name == 'build' || name == 'createState') continue;
 
       final paramsRaw = match.group(2)!.trim();
-      final isArrow = match.group(3) == '=>';
+      final isAsync = match.group(3) != null;
+      final isArrow = match.group(4) == '=>';
       final params = paramsRaw.isEmpty
           ? <String>[]
           : paramsRaw
@@ -268,7 +279,7 @@ class ClassExtractor {
           final bodyText = classBody.substring(braceStart + 1, braceEnd);
           body = DartSubsetParser.parseStatementsSource(bodyText);
         }
-        methods.add(MethodDef(name, params, body));
+        methods.add(MethodDef(name, params, body, isAsync: isAsync));
       } catch (e) {
         issues.add(ExtractionIssue(
           'تعذّر تحليل الدالة "$name" في الصنف "$className": $e',

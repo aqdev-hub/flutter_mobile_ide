@@ -53,11 +53,20 @@ class _ScaffoldMessengerRef {
 /// لبناء مفتاح فريد ومستقر لكل "نسخة" StatefulWidget، بما يسمح بوجود عدة
 /// نسخ نشطة من نفس الصنف (مثل بطاقات داخل قائمة) دون أن تتشارك الحالة.
 /// راجع [Interpreter._instantiateUserClass] للتفاصيل.
+///
+/// [instanceKey] معرّف نسخة StatefulWidget "الحالية" (إن وُجدت) — يُورَّث
+/// عبر السلسلة بنفس طريقة fields/methods. يُستخدَم عند setState() لتحديد
+/// **أي** [InterpretedStatefulHost] يجب إعادة رسمه محليًا (راجع
+/// Interpreter._requestInstanceRebuild) بدل إعادة بناء الجذر بالكامل — هذا
+/// هو الإصلاح الجوهري لمشكلة "setState لا يُحدِّث الشاشة الفرعية المفتوحة
+/// عبر Navigator.push". يبقى null خارج أي صنف Stateful (مثل داخل بناء
+/// StatelessWidget، الذي لا يملك state أصلًا في Dart الحقيقي أيضًا).
 class RuntimeScope {
   final Map<String, dynamic> locals;
   final Map<String, dynamic> fields;
   final Map<String, MethodDef> methods;
   final List<String> instancePath;
+  final String? instanceKey;
   final RuntimeScope? parent;
 
   RuntimeScope({
@@ -65,11 +74,13 @@ class RuntimeScope {
     Map<String, dynamic>? fields,
     Map<String, MethodDef>? methods,
     List<String>? instancePath,
+    String? instanceKey,
     this.parent,
   })  : locals = locals ?? {},
         fields = fields ?? (parent?.fields ?? {}),
         methods = methods ?? (parent?.methods ?? {}),
-        instancePath = instancePath ?? (parent?.instancePath ?? const []);
+        instancePath = instancePath ?? (parent?.instancePath ?? const []),
+        instanceKey = instanceKey ?? parent?.instanceKey;
 
   bool _localExists(String name) {
     if (locals.containsKey(name)) return true;
@@ -107,9 +118,98 @@ class RuntimeScope {
   }
 }
 
+/// ودجت Flutter **حقيقية** (State حقيقي من Flutter نفسه، وليس محاكاة) تُمثّل
+/// نسخة واحدة من صنف StatefulWidget مُفسَّر.
+///
+/// **لماذا أُضيف هذا الكلاس (الإصلاح الجوهري لمشكلة موثَّقة)**: قبل هذا
+/// التعديل، كان `Interpreter._instantiateUserClass` يُنفِّذ build() فورًا
+/// ويُعيد ناتجها كودجت عادي مباشرة — أي لم يكن هناك أي `StatefulWidget`/
+/// `State` حقيقي من Flutter في الشجرة إطلاقًا؛ الحالة كانت محفوظة فقط في
+/// خريطة داخلية (`_stateStores`)، وآلية setState() الوحيدة كانت "أعِد بناء
+/// الجذر بالكامل" (`onStateChanged` → rebuildTick في Riverpod).
+///
+/// هذا يعمل للشاشة الرئيسية فقط، لكنه **لا يصل إطلاقًا** لأي ودجت مبني داخل
+/// Route مفتوحة عبر `Navigator.push(...)`: الـ Navigator يحتفظ بأشجار
+/// الـ Routes المفتوحة في Overlay داخلي منفصل تمامًا عن الشجرة التي يُعيد
+/// `buildRoot` إنتاجها من الجذر. لذلك كانت القيمة تتغيّر فعليًا (`print`
+/// يؤكّد ذلك) لكن الشاشة الفرعية المفتوحة عبر Navigator لا تُعاد رسمها إلا
+/// عند التنقّل مجددًا (الذي يبني الشاشة من الصفر عبر builder فيعكس القيمة
+/// الجديدة، مما أوهم أن المشكلة "تُحلّ نفسها" عند التنقّل).
+///
+/// **الحل**: كل نسخة StatefulWidget مُفسَّرة تحصل الآن على `State` حقيقي من
+/// Flutter (هذا الكلاس)، مسجَّل في `Interpreter._hosts` بمفتاح [instanceKey]
+/// نفسه المستخدَم أصلًا في `_stateStores`. عند setState() من كود المستخدم،
+/// يستدعي المُفسِّر `.setState()` الحقيقي على هذا العنصر تحديدًا — فتُعيد
+/// Flutter رسمه **في مكانه بالضبط** بغضّ النظر عن كونه داخل Route مدفوعة،
+/// أو عنصر قائمة، أو الشاشة الرئيسية، لأنها الآن آلية Flutter الحقيقية،
+/// وليست محاكاة. فائدة إضافية: لم نعد نُعيد بناء الشجرة بأكملها من الجذر
+/// عند أي setState — فقط العنصر المتأثر (تحسين أداء حقيقي أيضًا).
+class InterpretedStatefulHost extends StatefulWidget {
+  final String instanceKey;
+  final WidgetClassDef stateDef;
+  final Map<String, dynamic> constructorArgs;
+  final List<String> instancePath;
+  final Interpreter interpreter;
+
+  InterpretedStatefulHost({
+    required this.instanceKey,
+    required this.stateDef,
+    required this.constructorArgs,
+    required this.instancePath,
+    required this.interpreter,
+  }) : super(key: ValueKey(instanceKey));
+
+  @override
+  State<InterpretedStatefulHost> createState() => _InterpretedStatefulHostState();
+}
+
+class _InterpretedStatefulHostState extends State<InterpretedStatefulHost> {
+  @override
+  void initState() {
+    super.initState();
+    widget.interpreter._registerHost(widget.instanceKey, this);
+  }
+
+  @override
+  void didUpdateWidget(covariant InterpretedStatefulHost oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // نادر عمليًا (نفس ValueKey يعني عادة نفس instanceKey ونفس العنصر)،
+    // لكن نتعامل معه دفاعيًا حتى لا يبقى تسجيل قديم يُشير لعنصر تغيّرت هويته.
+    if (oldWidget.instanceKey != widget.instanceKey) {
+      widget.interpreter._unregisterHost(oldWidget.instanceKey, this);
+      widget.interpreter._registerHost(widget.instanceKey, this);
+    }
+  }
+
+  @override
+  void dispose() {
+    widget.interpreter._unregisterHost(widget.instanceKey, this);
+    super.dispose();
+  }
+
+  /// يُستدعى من Interpreter._requestInstanceRebuild عند setState() الخاص
+  /// بهذه النسخة تحديدًا — إعادة رسم محلية حقيقية عبر State.setState، وليس
+  /// محاكاة.
+  void requestLocalRebuild() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return widget.interpreter._buildStatefulInstance(
+      widget.stateDef,
+      widget.constructorArgs,
+      widget.instanceKey,
+      widget.instancePath,
+      context,
+    );
+  }
+}
+
 /// المُفسِّر الرئيسي: يحوّل AST مستخرجة من كود المستخدم إلى شجرة ودجتس
-/// Flutter حقيقية، وينفّذ setState/Navigator/الحلقات/الدوال المساعدة كأفعال
-/// حقيقية على محرك Flutter المستضيف (وليس محاكاة). راجع README لحدود الدعم.
+/// Flutter حقيقية، وينفّذ setState/Navigator/الحلقات/الدوال المساعدة/
+/// async-await المبسَّط كأفعال حقيقية على محرك Flutter المستضيف (وليس
+/// محاكاة). راجع README لحدود الدعم.
 class Interpreter {
   final Map<String, WidgetClassDef> classRegistry;
   final void Function(String message, {bool isError}) log;
@@ -129,13 +229,22 @@ class Interpreter {
   /// النطاق بحجم الجلسة، غير مُعالَج بعد.
   final Map<String, Map<String, dynamic>> _stateStores = {};
 
+  /// سجلّ المضيفين الحقيقيين (InterpretedStatefulHost State) لكل instanceKey
+  /// نشط حاليًا في شجرة الودجتس — راجع توثيق [InterpretedStatefulHost]
+  /// للسبب والتفاصيل الكاملة. يُسجَّل عند initState ويُزال عند dispose.
+  final Map<String, _InterpretedStatefulHostState> _hosts = {};
+
   /// حارس يمنع حلقة لا نهائية من إعادة البناء: إن استُدعيت setState() بينما
-  /// المُفسِّر لا يزال داخل تنفيذ build فعليًا (أي أنها استُدعيت مباشرة من
-  /// جسم build، وليس من داخل lambda معالج حدث مثل onPressed سيُنفَّذ لاحقًا
-  /// بعد انتهاء البناء) — هذا خطأ في الكود المصدري نفسه (Flutter الحقيقي
-  /// يرفضه أيضًا بخطأ صريح "setState() called during build")، وبدون هذا
-  /// الحارس كان المُفسِّر يدخل في حلقة: بناء → setState → طلب بناء جديد →
-  /// بناء → ... بلا توقف، وهو ما يظهر للمستخدم كـ"ارتجاف" مستمر للشاشة.
+  /// المُفسِّر لا يزال داخل تنفيذ buildRoot فعليًا (أي أنها استُدعيت مباشرة
+  /// من جسم build مباشرةً، وليس من داخل lambda معالج حدث مثل onPressed
+  /// سيُنفَّذ لاحقًا بعد انتهاء البناء) — هذا خطأ في الكود المصدري نفسه
+  /// (Flutter الحقيقي يرفضه أيضًا بخطأ صريح "setState() called during
+  /// build"). ملاحظة: بعد التحويل لِـ InterpretedStatefulHost، هذا الحارس
+  /// يُغطّي فقط الجزء التزامني من buildRoot (بناء StatelessWidgets قبل أول
+  /// StatefulWidget)؛ حالات "setState أثناء build" الأخرى (مثل استدعاء
+  /// setState لعنصر آخر أثناء بناء عنصر مختلف) تُعالَج بأمان عبر try/catch
+  /// حول استدعاء setState الحقيقي في [_requestInstanceRebuild] بدل تعطّل
+  /// المعاينة بخطأ Flutter غير مترجَم.
   bool _isBuilding = false;
 
   // ------------------------- نظام الأخطاء الموحَّد -------------------------
@@ -192,6 +301,73 @@ class Interpreter {
     );
   }
 
+  // ------------------------- تسجيل/إعادة رسم المضيفين الحقيقيين -------------------------
+
+  void _registerHost(String instanceKey, _InterpretedStatefulHostState host) {
+    _hosts[instanceKey] = host;
+  }
+
+  void _unregisterHost(String instanceKey, _InterpretedStatefulHostState host) {
+    if (identical(_hosts[instanceKey], host)) _hosts.remove(instanceKey);
+  }
+
+  /// يُنفَّذ من [_InterpretedStatefulHostState.build] — ينفّذ جسم build
+  /// الخاص بصنف State **كقائمة جُمل كاملة** بنفس فيلد الحالة الدائم
+  /// (`_stateStores[instanceKey]`)، تمامًا كما كان يحدث سابقًا داخل
+  /// `_instantiateUserClass` مباشرة، لكن الآن يُستدعى من داخل build()
+  /// حقيقي لعنصر Flutter حقيقي بدل تنفيذه فورًا عند الإنشاء.
+  Widget _buildStatefulInstance(
+    WidgetClassDef stateDef,
+    Map<String, dynamic> constructorArgs,
+    String instanceKey,
+    List<String> instancePath,
+    BuildContext context,
+  ) {
+    final store = _stateStores[instanceKey]!;
+    final buildScope = RuntimeScope(
+      locals: {
+        'context': context,
+        'widget': _WidgetRef(constructorArgs),
+      },
+      fields: store,
+      methods: {for (final m in stateDef.methods) m.name: m},
+      instancePath: instancePath,
+      instanceKey: instanceKey,
+    );
+    return _runBuild(stateDef, buildScope);
+  }
+
+  /// يوجّه setState() إلى النسخة المحدَّدة فقط عبر مضيفها الحقيقي المسجَّل،
+  /// بدل إعادة بناء الجذر بالكامل — هذا هو الإصلاح الجوهري لمشكلة "setState
+  /// لا يُحدِّث الشاشة الفرعية المفتوحة عبر Navigator.push" (راجع التوثيق
+  /// الكامل أعلى [InterpretedStatefulHost]).
+  void _requestInstanceRebuild(String? instanceKey) {
+    if (instanceKey != null) {
+      final host = _hosts[instanceKey];
+      if (host != null) {
+        try {
+          host.requestLocalRebuild();
+          return;
+        } catch (e) {
+          // على الأرجح استثناء Flutter حقيقي "setState() or markNeedsBuild()
+          // called during build" (استُدعيت أثناء تنفيذ build() لعنصر آخر
+          // فعليًا قيد التنفيذ الآن) — نحوّلها لرسالة عربية واضحة في الكونسول
+          // بدل ترك الاستثناء يتسبّب في شاشة حمراء غير مُترجَمة.
+          log(
+            'تعذّر تحديث الشاشة مباشرة بعد setState (على الأرجح استُدعيت أثناء '
+            'بناء ودجت آخر قيد التنفيذ فعليًا الآن): $e',
+            isError: true,
+          );
+          return;
+        }
+      }
+    }
+    // احتياطي دفاعي: لم يُسجَّل أي مضيف لهذه النسخة (حالة نادرة — مثلًا
+    // النسخة الجذرية قبل أول Host، أو setState من مكان غير متوقَّع) —
+    // نلجأ لإعادة بناء الجذر بالكامل كخيار أخير بدل تجاهل التحديث بصمت.
+    onStateChanged();
+  }
+
   // ------------------------- Expression evaluation -------------------------
 
   dynamic _eval(Expr expr, RuntimeScope scope) {
@@ -206,6 +382,14 @@ class Interpreter {
     }
 
     if (expr is IdentifierExpr) return _resolveIdentifier(expr.name, scope);
+
+    if (expr is AwaitExpr) {
+      throw PreviewRuntimeException(
+        'لا يمكن استخدام await هنا: التعبير المحيط ليس داخل دالة/lambda '
+        'مُعلَّمة async. أضيفي async بعد قوس المعاملات مباشرة، مثل: '
+        '() async { ... }.',
+      );
+    }
 
     if (expr is ListExpr) {
       final result = <dynamic>[];
@@ -256,6 +440,12 @@ class Interpreter {
     }
 
     if (expr is LambdaExpr) {
+      if (expr.isAsync) {
+        // لامدا async: تُنفَّذ عبر مسار تنفيذ يدعم await (راجع _invokeLambdaAsync
+        // وقسم "دعم async/await المبسَّط" أدناه). النتيجة Future<dynamic>،
+        // ما يتوافق تمامًا مع onPressed/onTap وغيرها (تُطلَق ولا تُنتظَر).
+        return InterpretedCallable((args) => _invokeLambdaAsync(expr, args, scope));
+      }
       return InterpretedCallable((args) {
         final callScope = RuntimeScope(fields: scope.fields, methods: scope.methods, parent: scope);
         for (var i = 0; i < expr.params.length && i < args.length; i++) {
@@ -325,10 +515,13 @@ class Interpreter {
     // مثل `onPressed: changeMessage` (بلا أقواس). سابقًا كان يُطابَق هذا
     // فقط عند وجود استدعاء فعلي (اسم متبوع بأقواس)؛ الآن نتحقق أيضًا من
     // خريطة methods عند تحليل معرِّف مجرّد، ونُغلِّفه بـ InterpretedCallable
-    // مربوطًا بنفس النطاق الحالي حتى يعمل تمامًا كأنه lambda مكافئ.
+    // مربوطًا بنفس النطاق الحالي حتى يعمل تمامًا كأنه lambda مكافئ —
+    // ويحترم isAsync إن كانت الدالة المُشار إليها مُعلَّمة async.
     if (scope.methods.containsKey(name)) {
       final method = scope.methods[name]!;
-      return InterpretedCallable((args) => _invokeMethod(method, args, scope));
+      return InterpretedCallable(
+        (args) => method.isAsync ? _invokeMethodAsync(method, args, scope) : _invokeMethod(method, args, scope),
+      );
     }
     if (name == 'true') return true;
     if (name == 'false') return false;
@@ -490,7 +683,11 @@ class Interpreter {
           );
           return null;
         }
-        onStateChanged();
+        // **الإصلاح الجوهري**: نوجّه setState لهوية النسخة الحالية تحديدًا
+        // (scope.instanceKey) بدل استدعاء onStateChanged() العام — راجع
+        // توثيق InterpretedStatefulHost/_requestInstanceRebuild للتفاصيل
+        // الكاملة حول سبب هذا التغيير.
+        _requestInstanceRebuild(scope.instanceKey);
         return null;
 
       case 'print':
@@ -522,10 +719,12 @@ class Interpreter {
           return _instantiateUserClass(name, expr, scope);
         }
         // دالة مساعدة مُعرَّفة داخل نفس الصنف (مثل `_buildRow('a')`) — تُنفَّذ
-        // بنفس آلية تنفيذ build (قائمة جُمل + التقاط return الأخير).
+        // بنفس آلية تنفيذ build (قائمة جُمل + التقاط return الأخير)، أو عبر
+        // مسار async إن كانت مُعلَّمة async.
         if (scope.methods.containsKey(name)) {
           final (pos, _) = _evalArgs(expr, scope);
-          return _invokeMethod(scope.methods[name]!, pos, scope);
+          final method = scope.methods[name]!;
+          return method.isAsync ? _invokeMethodAsync(method, pos, scope) : _invokeMethod(method, pos, scope);
         }
         final (pos, named) = _evalArgs(expr, scope);
         if (BuiltinWidgets.valueConstructors.contains(name)) {
@@ -574,6 +773,30 @@ class Interpreter {
       return _ScaffoldMessengerRef(context);
     }
 
+    // ------------------------- دعم async/await المبسَّط: Future.* -------------------------
+    // مدعوم حاليًا: Future.delayed(duration, [computation]) وFuture.value(x)
+    // — كافٍ لتغطية النمط الشائع "تأخير محاكى ثم setState()". راجع القسم
+    // الكامل لدعم async/await أسفل هذا الملف لحدود الدعم بدقة.
+    if (namespace == 'Future') {
+      final (pos, named) = _evalArgs(expr, scope);
+      switch (member) {
+        case 'delayed':
+          final duration = pos.isNotEmpty && pos.first is Duration ? pos.first as Duration : Duration.zero;
+          final computation = pos.length > 1 ? pos[1] : named['computation'];
+          return Future.delayed(duration, () {
+            if (computation is InterpretedCallable) return computation.call(const []);
+            return null;
+          });
+        case 'value':
+          return Future.value(pos.isNotEmpty ? pos.first : null);
+        default:
+          throw PreviewRuntimeException(
+            'Future.$member() غير مدعوم بعد — المدعوم حاليًا فقط: '
+            'Future.delayed(duration) وFuture.value(x).',
+          );
+      }
+    }
+
     final composedName = '$namespace.$member';
     final (pos, named) = _evalArgs(expr, scope);
     if (BuiltinWidgets.valueConstructors.contains(composedName)) {
@@ -588,8 +811,7 @@ class Interpreter {
   }
 
   /// ينشئ نسخة من صنف مُعرَّف داخل المشروع (StatelessWidget، أو الزوج
-  /// StatefulWidget+State) ويُنفّذ دالة build الخاصة به لإنتاج شجرة ودجتس
-  /// فعلية.
+  /// StatefulWidget+State) ويُنتج ودجت Flutter حقيقية تُمثّله.
   ///
   /// **هوية النسخة لصنف Stateful**: مفتاح مخزن الحالة = اسم صنف الحالة +
   /// [expr.id] (معرّف ثابت لعقدة الاستدعاء هذه تحديدًا في AST) + مسار
@@ -599,6 +821,12 @@ class Interpreter {
   /// in items) MyCounter(x)`) يحصل كل عنصر منه على حالة منفصلة أيضًا (لأن
   /// instancePath مختلف لكل تكرار) — بينما يبقى المفتاح مستقرًا لنفس العنصر
   /// عبر setState المتتالية ضمن نفس الجلسة.
+  ///
+  /// **تحديث جوهري**: لصنف StatefulWidget، لم نعد نُنفِّذ build() هنا فورًا
+  /// (كما كان سابقًا) — بل نُعيد [InterpretedStatefulHost]، ودجت Flutter
+  /// حقيقية بـ State حقيقي، يستدعي build() الفعلي عند الحاجة فقط عبر
+  /// Flutter نفسه. راجع توثيق ذلك الكلاس لشرح كامل للسبب (إصلاح مشكلة
+  /// setState لا يُحدِّث الشاشات المفتوحة عبر Navigator.push).
   Widget _instantiateUserClass(String name, CallExpr expr, RuntimeScope scope) {
     final def = classRegistry[name]!;
     final (pos, named) = _evalArgs(expr, scope);
@@ -615,7 +843,7 @@ class Interpreter {
       }
 
       final instanceKey = '${stateDef.name}#${expr.id}#${scope.instancePath.join('/')}';
-      final store = _stateStores.putIfAbsent(instanceKey, () {
+      _stateStores.putIfAbsent(instanceKey, () {
         final initial = <String, dynamic>{};
         final fieldScope = RuntimeScope(locals: const {});
         for (final field in stateDef.fields) {
@@ -624,16 +852,13 @@ class Interpreter {
         return initial;
       });
 
-      final buildScope = RuntimeScope(
-        locals: {
-          'context': scope.resolve('context'),
-          'widget': _WidgetRef(constructorArgs),
-        },
-        fields: store,
-        methods: {for (final m in stateDef.methods) m.name: m},
-        instancePath: scope.instancePath, // يُورَّث حتى تبقى الودجتس المتداخلة تحت هذا العنصر مميّزة بدورها
+      return InterpretedStatefulHost(
+        instanceKey: instanceKey,
+        stateDef: stateDef,
+        constructorArgs: constructorArgs,
+        instancePath: scope.instancePath,
+        interpreter: this,
       );
-      return _runBuild(stateDef, buildScope);
     }
 
     // StatelessWidget (أو صنف بلا Base معروف): الحقول تُحقن مباشرة كحالة قراءة فقط.
@@ -670,9 +895,9 @@ class Interpreter {
     }
   }
 
-  /// ينفّذ دالة مساعدة مُعرَّفة داخل الصنف (غير build) — نفس آلية _runBuild
-  /// لكن دون تحويل غياب return إلى ودجت خطأ (لأن الناتج قد يكون أي نوع،
-  /// وليس بالضرورة Widget).
+  /// ينفّذ دالة مساعدة مُعرَّفة داخل الصنف (غير build، غير async) — نفس آلية
+  /// _runBuild لكن دون تحويل غياب return إلى ودجت خطأ (لأن الناتج قد يكون
+  /// أي نوع، وليس بالضرورة Widget).
   dynamic _invokeMethod(MethodDef method, List<dynamic> args, RuntimeScope callerScope) {
     final methodScope = RuntimeScope(
       fields: callerScope.fields,
@@ -837,5 +1062,175 @@ class Interpreter {
       return;
     }
     throw PreviewRuntimeException('لا يمكن التعيين لهذا التعبير');
+  }
+
+  // ==================================================================
+  // ==================== دعم async/await المبسَّط ====================
+  // ==================================================================
+  //
+  // **حدّ صريح ومهم موثَّق عمدًا (وليس خللًا)**: هذا ليس دعمًا كاملًا
+  // لِـ async/await في Dart. المدعوم فعليًا هو `await expr` **كطرف كامل
+  // مباشر لجملة فقط**:
+  //   - `await x;`                 (جملة تعبير)
+  //   - `var y = await x;`         (تصريح متغيّر)
+  //   - `y = await x;`             (تعيين، بما فيها += / -=)
+  //   - `return await x;`          (إرجاع)
+  //   - شرط if/while: `if (await x) {...}` / `while (await x) {...}`
+  //
+  // **غير مدعوم عمدًا** (يظهر كخطأ واضح بدل فشل صامت أو نتيجة خاطئة):
+  //   - await متداخل داخل تعبير أكبر، مثل `1 + await x` أو `foo(await x)`
+  //     — سيُقيَّم الجزء الداخلي عبر _eval العادية التي تفشل بخطأ AwaitExpr
+  //     الصريح أعلاه.
+  //   - await داخل حلقات for/for-in الكلاسيكية (تُنفَّذ هذه الحلقات
+  //     تزامنيًا حتى داخل دالة async — راجع _execAsync أدناه).
+  //   - try/catch حول await، وasync*/Stream بشكل عام.
+  //
+  // القيم القابلة لِـ await المدعومة: أي Future حقيقي من Dart (بما فيها
+  // Future.delayed/Future.value المُضافتان أعلاه في _evalNamespacedCall).
+
+  /// ينفّذ دالة مساعدة async (مُعرَّفة داخل صنف) — النظير async لِـ
+  /// _invokeMethod.
+  Future<dynamic> _invokeMethodAsync(MethodDef method, List<dynamic> args, RuntimeScope callerScope) async {
+    final methodScope = RuntimeScope(
+      fields: callerScope.fields,
+      methods: callerScope.methods,
+      instanceKey: callerScope.instanceKey,
+      parent: callerScope,
+    );
+    for (var i = 0; i < method.params.length && i < args.length; i++) {
+      methodScope.locals[method.params[i]] = args[i];
+    }
+    try {
+      for (final stmt in method.body) {
+        await _execAsync(stmt, methodScope);
+      }
+    } on _ReturnSignal catch (signal) {
+      return signal.value;
+    } catch (e) {
+      log('خطأ أثناء تنفيذ دالة async "${method.name}": $e', isError: true);
+      return null;
+    }
+    return null;
+  }
+
+  /// ينفّذ لامدا async (مثل `onPressed: () async { ... }`) — النظير async
+  /// لجسم اللامدا العادية داخل _eval.
+  Future<dynamic> _invokeLambdaAsync(LambdaExpr expr, List<dynamic> args, RuntimeScope scope) async {
+    final callScope = RuntimeScope(
+      fields: scope.fields,
+      methods: scope.methods,
+      instanceKey: scope.instanceKey,
+      parent: scope,
+    );
+    for (var i = 0; i < expr.params.length && i < args.length; i++) {
+      callScope.locals[expr.params[i]] = args[i];
+    }
+    var execScope = callScope;
+    if (args.length == 2 && args[0] is BuildContext && args[1] is int) {
+      execScope = RuntimeScope(
+        fields: callScope.fields,
+        methods: callScope.methods,
+        instanceKey: callScope.instanceKey,
+        parent: callScope,
+        instancePath: [...scope.instancePath, 'item:${args[1]}'],
+      );
+    }
+    try {
+      for (final stmt in expr.body) {
+        await _execAsync(stmt, execScope);
+      }
+    } on _ReturnSignal catch (signal) {
+      return signal.value;
+    } catch (e) {
+      log('خطأ أثناء تنفيذ دالة async: $e', isError: true);
+      return null;
+    }
+    return null;
+  }
+
+  /// نسخة "واعية بـ await" من [_exec] — تُغطّي فقط الجُمل التي يَشيع
+  /// استخدام await داخلها مباشرة (تعبير، return، تصريح متغيّر، تعيين، if،
+  /// while). لأي جملة أخرى (for/for-in الكلاسيكية، ++/--، break/continue)
+  /// نُفوِّض إلى [_exec] التزامنية العادية — وهذا يعني أن await **غير
+  /// مسموح داخلها** (حد صريح موثَّق أعلاه، وليس خللًا).
+  Future<void> _execAsync(Stmt stmt, RuntimeScope scope) async {
+    if (stmt.line > 0) _currentLine = stmt.line;
+
+    if (stmt is ExprStmt) {
+      await _evalMaybeAwait(stmt.expr, scope);
+      return;
+    }
+    if (stmt is ReturnStmt) {
+      final value = stmt.value == null ? null : await _evalMaybeAwait(stmt.value!, scope);
+      throw _ReturnSignal(value);
+    }
+    if (stmt is VarDeclStmt) {
+      scope.locals[stmt.name] = stmt.initializer == null ? null : await _evalMaybeAwait(stmt.initializer!, scope);
+      return;
+    }
+    if (stmt is AssignStmt) {
+      await _execAssignAsync(stmt, scope);
+      return;
+    }
+    if (stmt is IfStmt) {
+      if (await _evalMaybeAwait(stmt.condition, scope) as bool) {
+        for (final s in stmt.thenBranch) {
+          await _execAsync(s, scope);
+        }
+      } else {
+        for (final s in stmt.elseBranch) {
+          await _execAsync(s, scope);
+        }
+      }
+      return;
+    }
+    if (stmt is WhileStmt) {
+      while (await _evalMaybeAwait(stmt.condition, scope) as bool) {
+        try {
+          for (final s in stmt.body) {
+            await _execAsync(s, scope);
+          }
+        } on _BreakSignal {
+          break;
+        } on _ContinueSignal {
+          continue;
+        }
+      }
+      return;
+    }
+
+    // بقية أنواع الجُمل: تُنفَّذ تزامنيًا كالمعتاد — await غير مدعوم داخلها
+    // في هذا الإصدار المبسَّط (راجع التوثيق أعلى هذا القسم).
+    _exec(stmt, scope);
+  }
+
+  Future<void> _execAssignAsync(AssignStmt stmt, RuntimeScope scope) async {
+    late final dynamic newValue;
+    switch (stmt.op) {
+      case '=':
+        newValue = await _evalMaybeAwait(stmt.value, scope);
+        break;
+      case '+=':
+        newValue = (_evalTargetValue(stmt.target, scope) as dynamic) + await _evalMaybeAwait(stmt.value, scope);
+        break;
+      case '-=':
+        newValue =
+            (_evalTargetValue(stmt.target, scope) as num) - (await _evalMaybeAwait(stmt.value, scope) as num);
+        break;
+      default:
+        throw PreviewRuntimeException('عملية تعيين غير مدعومة: ${stmt.op}');
+    }
+    _assignTarget(stmt.target, newValue, scope);
+  }
+
+  /// يُقيِّم تعبيرًا مع دعم await **على المستوى الأعلى فقط** لهذا التعبير
+  /// تحديدًا (وليس أي await متداخل بداخله بعمق أكبر — حد موثَّق أعلاه).
+  Future<dynamic> _evalMaybeAwait(Expr expr, RuntimeScope scope) async {
+    if (expr is AwaitExpr) {
+      final value = _eval(expr.inner, scope);
+      if (value is Future) return await value;
+      return value; // await على قيمة غير Future صالح في Dart أيضًا (يُعيدها كما هي)
+    }
+    return _eval(expr, scope);
   }
 }

@@ -165,7 +165,8 @@ class _Lexer {
 
 /// محلّل نحوي تنازلي (recursive-descent) يبني AST من قائمة tokens.
 /// يدعم تعبيرات إنشاء الودجتس المتشعبة، وجُملًا (شروط/تعيينات/زيادة/حلقات
-/// for و while وbreak/continue) كافية لأغلب أنماط الشاشات العملية.
+/// for و while وbreak/continue) كافية لأغلب أنماط الشاشات العملية، ودعمًا
+/// مبسَّطًا لِـ async/await (راجع widget_interpreter.dart لحدود الدعم).
 class DartSubsetParser {
   final List<_Token> _tokens;
   int pos = 0;
@@ -356,7 +357,7 @@ class DartSubsetParser {
 
   // ------------------------- Expressions -------------------------
   // ترتيب الأولوية: ternary > or > and > equality > relational > additive
-  // > multiplicative > unary > postfix > primary
+  // > multiplicative > unary (await/!/-) > postfix > primary
 
   Expr _expression() => _ternary();
 
@@ -424,6 +425,14 @@ class DartSubsetParser {
   }
 
   Expr _unary() {
+    // await: مدعوم فقط كتعبير أحادي (unary) — نفس مستوى أولوية !/- تقريبًا،
+    // بما يكفي لتغطية النمط الشائع `await someFuture()` أو
+    // `await Future.delayed(...)`. راجع widget_interpreter.dart لحدود
+    // الدعم الفعلية وقت التنفيذ (await كطرف كامل لجملة فقط).
+    if (_check(_TokType.identifier, 'await')) {
+      _advance();
+      return AwaitExpr(_unary());
+    }
     if (_match('!') || _check(_TokType.symbol, '-')) {
       final op = _advance().text;
       return UnaryExpr(op, _unary());
@@ -523,6 +532,7 @@ class DartSubsetParser {
 
     if (_match('(')) {
       // إمّا تعبير بين أقواس، أو دالة لامدا: (params) => expr / (params) { ... }
+      // / (params) async => expr / (params) async { ... }
       final savedPos = pos;
       final params = <String>[];
       var isParamList = true;
@@ -536,14 +546,17 @@ class DartSubsetParser {
           if (!_match(',')) break;
         }
       }
-      if (isParamList && _match(')') && (_check(_TokType.symbol, '=>') || _check(_TokType.symbol, '{'))) {
-        if (_match('=>')) {
-          final bodyExpr = _expression();
-          _match(';');
-          return LambdaExpr(params, [ReturnStmt(bodyExpr)]);
+      if (isParamList && _match(')')) {
+        final isAsync = _match('async');
+        if (_check(_TokType.symbol, '=>') || _check(_TokType.symbol, '{')) {
+          if (_match('=>')) {
+            final bodyExpr = _expression();
+            _match(';');
+            return LambdaExpr(params, [ReturnStmt(bodyExpr)], isAsync: isAsync);
+          }
+          final body = _block();
+          return LambdaExpr(params, body, isAsync: isAsync);
         }
-        final body = _block();
-        return LambdaExpr(params, body);
       }
       // لم تكن قائمة معاملات لامدا: نُرجع المؤشر ونحلّلها كتعبير بين أقواس عادي.
       pos = savedPos;
