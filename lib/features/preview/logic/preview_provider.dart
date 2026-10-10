@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../console/logic/console_provider.dart';
 import '../../project_explorer/data/models/file_node.dart';
 import '../../project_explorer/logic/project_provider.dart';
+import '../../project_explorer/logic/project_state.dart';
 import 'dart_subset_ast.dart';
 import 'preview_engine.dart';
 import 'widget_interpreter.dart';
@@ -46,15 +47,20 @@ final previewProvider = StateNotifierProvider<PreviewNotifier, PreviewState>((re
   return PreviewNotifier(ref);
 });
 
-/// **رجوع متعمَّد عن محرّك dart_eval** — راجع التعليق التوضيحي في
-/// preview_engine.dart لتفاصيل السبب (خلل جوهري موثَّق في flutter_eval يمنع
-/// تنفيذ أي صنف مستخدم يرث من StatelessWidget/StatefulWidget). هذا هو
-/// المحرّك اليدوي المستقر السابق: يُدير دورة حياة "التشغيل"، ويُعيد استخدام
-/// نفس [Interpreter] لكل عمليات rebuild اللاحقة (setState) حتى تبقى حالة
-/// الشاشات محفوظة أثناء الجلسة.
+/// يُدير دورة حياة "التشغيل"، ويُعيد استخدام نفس [Interpreter] لكل عمليات
+/// rebuild اللاحقة (setState) حتى تبقى حالة الشاشات محفوظة أثناء الجلسة.
 class PreviewNotifier extends StateNotifier<PreviewState> {
   final Ref _ref;
-  PreviewNotifier(this._ref) : super(const PreviewState());
+
+  PreviewNotifier(this._ref) : super(const PreviewState()) {
+    // إيقاف المعاينة تلقائيًا عند تبديل المشروع فعليًا (تغيّر مسار الجذر)،
+    // وليس عند تحديث نفس المشروع.
+    _ref.listen<ProjectState>(projectProvider, (previous, next) {
+      if (previous?.root?.path != next.root?.path && state.status != PreviewStatus.idle) {
+        stop();
+      }
+    });
+  }
 
   Future<void> run() async {
     final project = _ref.read(projectProvider);
@@ -109,6 +115,8 @@ class PreviewNotifier extends StateNotifier<PreviewState> {
       classRegistry: result.classRegistry,
       log: (msg, {isError = false}) => _ref.read(consoleProvider.notifier).log(msg, isError: isError),
       onStateChanged: requestRebuild,
+      // جذر المشروع المفتوح — لحلّ مسارات Image.asset(...) النسبية.
+      projectRootPath: root.path,
     );
 
     state = PreviewState(
@@ -119,8 +127,6 @@ class PreviewNotifier extends StateNotifier<PreviewState> {
     _ref.read(consoleProvider.notifier).log('✅ تم التشغيل بنجاح — ${result.classRegistry.length} صنف مكتشَف.');
   }
 
-  /// يُستدعى من داخل المُفسِّر عند setState — يزيد عدّاد rebuild لإجبار
-  /// الواجهة (PreviewPanel) على إعادة تنفيذ build وإظهار الحالة الجديدة.
   void requestRebuild() {
     state = state.copyWith(rebuildTick: state.rebuildTick + 1);
   }

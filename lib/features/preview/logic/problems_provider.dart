@@ -39,6 +39,20 @@ class ProblemsNotifier extends StateNotifier<Map<String, List<ProblemItem>>> {
     }
   }
 
+  /// يمسح كل المشاكل المُسجَّلة دفعة واحدة — يُستدعى عند تبديل المشروع
+  /// بالكامل (وليس مجرد تحديثه) من [EditorTabsNotifier.closeAll]، حتى لا
+  /// تبقى مشاكل ملفات تخصّ مشروعًا سابقًا معروضة في اللوحة بعد الانتقال
+  /// لمشروع مختلف تمامًا.
+  void clearAll() {
+    for (final timer in _debounceTimers.values) {
+      timer.cancel();
+    }
+    _debounceTimers.clear();
+    if (state.isNotEmpty) {
+      state = {};
+    }
+  }
+
   @override
   void dispose() {
     for (final timer in _debounceTimers.values) {

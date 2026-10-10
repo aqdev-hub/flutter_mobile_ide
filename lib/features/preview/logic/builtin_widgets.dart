@@ -18,12 +18,7 @@ Widget Function(BuildContext, int)? _asIndexedBuilder(dynamic v) =>
 /// المُفسَّرة والمحرك الفعلي لـ Flutter الذي يرسم ويستقبل الأحداث.
 ///
 /// يعيد null إن كان الاسم غير معروف، ليقرر المُفسِّر عندها عرض عنصر نائب
-/// واضح بدل تعطّل المعاينة بالكامل — حسب معيار "معالجة الأخطاء بوضوح".
-///
-/// **تحديث**: توسيع القائمة (ودجتس تفاعل/تخطيط/تغذية راجعة شائعة، أيقونات
-/// وألوان إضافية، وقيم مساعدة مثل BoxShadow/Border/Duration) — القائمة
-/// تبقى بطبيعتها محدودة عمدًا (راجع README)، لكنها الآن تغطي جزءًا أكبر
-/// بكثير من الاستخدام العملي اليومي.
+/// واضح بدل تعطّل المعاينة بالكامل.
 class BuiltinWidgets {
   BuiltinWidgets._();
 
@@ -142,6 +137,13 @@ class BuiltinWidgets {
           child: arg('child') as Widget?,
         );
 
+      // **إضافة جديدة**: الصيغتان المسمّاتان الشائعتان لِـ SizedBox.
+      case 'SizedBox.shrink':
+        return SizedBox.shrink(child: arg('child') as Widget?);
+
+      case 'SizedBox.expand':
+        return SizedBox.expand(child: arg('child') as Widget?);
+
       case 'Icon':
         return Icon(
           arg('icon', 0) as IconData? ?? Icons.help_outline,
@@ -152,19 +154,31 @@ class BuiltinWidgets {
       case 'ElevatedButton':
         return ElevatedButton(
           onPressed: _asVoid(arg('onPressed')),
+          style: arg('style') as ButtonStyle?,
           child: arg('child') as Widget? ?? const Text(''),
         );
 
       case 'TextButton':
         return TextButton(
           onPressed: _asVoid(arg('onPressed')),
+          style: arg('style') as ButtonStyle?,
           child: arg('child') as Widget? ?? const Text(''),
         );
 
       case 'OutlinedButton':
         return OutlinedButton(
           onPressed: _asVoid(arg('onPressed')),
+          style: arg('style') as ButtonStyle?,
           child: arg('child') as Widget? ?? const Text(''),
+        );
+
+      case 'Material':
+        return Material(
+          color: arg('color') as Color?,
+          elevation: (arg('elevation') as num?)?.toDouble() ?? 0.0,
+          borderRadius: arg('borderRadius') as BorderRadiusGeometry?,
+          clipBehavior: arg('borderRadius') != null ? Clip.antiAlias : Clip.none,
+          child: arg('child') as Widget?,
         );
 
       case 'IconButton':
@@ -314,7 +328,6 @@ class BuiltinWidgets {
           child: arg('child') as Widget? ?? const SizedBox(),
         );
 
-      // --- حوارات وإشعارات ---
       case 'SnackBar':
         return SnackBar(
           content: arg('content') as Widget? ?? const Text(''),
@@ -329,7 +342,6 @@ class BuiltinWidgets {
           actions: (arg('actions') as List?)?.cast<Widget>(),
         );
 
-      // --- قوائم منسدلة (مبسّطة: بدون Generics حقيقية) ---
       case 'DropdownButton':
         return DropdownButton<dynamic>(
           value: arg('value'),
@@ -406,8 +418,6 @@ class BuiltinWidgets {
         return Switch(
           value: arg('value') as bool? ?? false,
           onChanged: _asBoolCb(arg('onChanged')),
-          // 'activeColor' مُهملة منذ Flutter 3.31 لصالح activeThumbColor —
-          // حدّثناها هنا للإصدار الحديث.
           activeThumbColor: arg('activeColor') as Color?,
         );
 
@@ -420,11 +430,6 @@ class BuiltinWidgets {
 
       case 'Radio':
         {
-          // مبسّط عمدًا: نقارن value/groupValue كقيم ديناميكية بدل Generics
-          // حقيقية (T)، وهذا كافٍ لأغلب استخدامات Radio العملية (نص/رقم بسيط).
-          // ملاحظة: معامل onChanged على Radio مُباشرةً أصبح مُهملًا في
-          // إصدارات Flutter الحديثة لصالح RadioGroup، لكنه لا يزال يعمل
-          // فعليًا (تحذير وليس خطأ) — نُبقيه لتفادي إعادة هيكلة أكبر الآن.
           final onChangedCallable = arg('onChanged');
           return Radio<dynamic>(
             value: arg('value'),
@@ -463,6 +468,32 @@ class BuiltinWidgets {
           maxLines: (arg('maxLines') as num?)?.toInt() ?? 1,
         );
 
+      // **إضافة جديدة**: TextFormField كامل — بما فيه validator وonSaved.
+      // Flutter الحقيقية ترفض (assert) تمرير controller وinitialValue معًا،
+      // لذلك نمرّر initialValue فقط إن لم يوجد controller.
+      case 'TextFormField':
+        {
+          final validatorCallable = arg('validator');
+          final onSavedCallable = arg('onSaved');
+          final hasController = arg('controller') != null;
+          return TextFormField(
+            controller: arg('controller') as TextEditingController?,
+            initialValue: hasController ? null : arg('initialValue') as String?,
+            decoration: arg('decoration') as InputDecoration? ?? const InputDecoration(),
+            obscureText: arg('obscureText') as bool? ?? false,
+            maxLines: (arg('maxLines') as num?)?.toInt() ?? 1,
+            onChanged: _asStringCb(arg('onChanged')),
+            validator: validatorCallable is InterpretedCallable
+                ? (String? value) => validatorCallable.call([value])?.toString()
+                : null,
+            onSaved: onSavedCallable is InterpretedCallable
+                ? (String? value) {
+                    onSavedCallable.call([value]);
+                  }
+                : null,
+          );
+        }
+
       case 'Drawer':
         return Drawer(child: arg('child') as Widget?);
 
@@ -500,15 +531,13 @@ class BuiltinWidgets {
         return const Placeholder();
 
       case 'BottomNavigationBarItem':
-        return null; // يُعامَل كقيمة خاصة، وليس Widget مباشر — موجود للتوثيق.
+        return null;
 
       default:
         return null;
     }
   }
 
-  /// عناصر ليست Widgets لكنها كائنات قيمة (EdgeInsets, TextStyle, Colors...)
-  /// نبنيها هنا بشكل منفصل حتى لا نخلط "بناء ودجت" بـ"بناء قيمة مساعدة".
   static Object? buildValue(String name, List<dynamic> pos, Map<String, dynamic> named) {
     dynamic arg(String key, [int? posIndex]) =>
         named[key] ?? (posIndex != null && posIndex < pos.length ? pos[posIndex] : null);
@@ -528,6 +557,13 @@ class BuiltinWidgets {
           right: (arg('right') as num?)?.toDouble() ?? 0,
           bottom: (arg('bottom') as num?)?.toDouble() ?? 0,
         );
+      case 'EdgeInsets.fromLTRB':
+        return EdgeInsets.fromLTRB(
+          (pos.isNotEmpty ? pos[0] as num : 0).toDouble(),
+          (pos.length > 1 ? pos[1] as num : 0).toDouble(),
+          (pos.length > 2 ? pos[2] as num : 0).toDouble(),
+          (pos.length > 3 ? pos[3] as num : 0).toDouble(),
+        );
       case 'TextStyle':
         return TextStyle(
           fontSize: (arg('fontSize') as num?)?.toDouble(),
@@ -537,16 +573,28 @@ class BuiltinWidgets {
           decoration: arg('decoration') as TextDecoration?,
           letterSpacing: (arg('letterSpacing') as num?)?.toDouble(),
         );
+      // **تحديث**: InputDecoration الآن يدعم label: Widget (بديلًا عن
+      // labelText النصي)، وfloatingLabelBehavior (تثبيت التسمية في الأعلى
+      // دائمًا عبر FloatingLabelBehavior.always)، وعددًا من الخصائص الشائعة
+      // الأخرى (helperText/errorText/filled/fillColor/contentPadding/
+      // labelStyle/hintStyle/enabledBorder/focusedBorder).
       case 'InputDecoration':
         return InputDecoration(
           hintText: arg('hintText') as String?,
           labelText: arg('labelText') as String?,
+          label: arg('label') as Widget?,
+          floatingLabelBehavior: arg('floatingLabelBehavior') as FloatingLabelBehavior?,
+          helperText: arg('helperText') as String?,
+          errorText: arg('errorText') as String?,
+          filled: arg('filled') as bool?,
+          fillColor: arg('fillColor') as Color?,
+          contentPadding: arg('contentPadding') as EdgeInsetsGeometry?,
+          labelStyle: arg('labelStyle') as TextStyle?,
+          hintStyle: arg('hintStyle') as TextStyle?,
           prefixIcon: arg('prefixIcon') as Widget?,
           suffixIcon: arg('suffixIcon') as Widget?,
-          // كنا سابقًا نفرض OutlineInputBorder ثابتة ونتجاهل ما يكتبه
-          // المستخدم فعليًا — وهذا بالضبط ما كان يُسبّب فشل استخدام
-          // OutlineInputBorder() صراحةً (يُقيَّم كوسيط قبل تجاهله، فيفشل
-          // إن لم يكن مسجَّلًا أصلًا). الآن نقرأ القيمة الفعلية.
+          enabledBorder: arg('enabledBorder') as InputBorder?,
+          focusedBorder: arg('focusedBorder') as InputBorder?,
           border: arg('border') as InputBorder? ?? const OutlineInputBorder(),
         );
       case 'BoxDecoration':
@@ -604,13 +652,8 @@ class BuiltinWidgets {
           label: arg('label') as String? ?? '',
         );
       case 'Color':
-        // Color(0xFFE3F2FD) — يحتاج دعم قراءة الأرقام السداسية عشرية في
-        // المُحلِّل اللفظي (dart_subset_parser.dart)، وهو مُصلَح الآن.
         return Color((pos.isNotEmpty ? pos[0] as int : 0));
       case 'TextEditingController':
-        // كائن Flutter حقيقي (وليس محاكاة) — يُمرَّر فعليًا لِـ TextField
-        // عبر معامل controller: الجديد، ويدعم .text و.clear() (راجع
-        // widget_interpreter.dart لتفاصيل الدعم المحدود لتوابعه).
         return TextEditingController(text: arg('text') as String? ?? '');
       case 'OutlineInputBorder':
         return OutlineInputBorder(
@@ -630,6 +673,33 @@ class BuiltinWidgets {
         return DropdownMenuItem<dynamic>(
           value: arg('value'),
           child: arg('child') as Widget? ?? const SizedBox(),
+        );
+      case 'ElevatedButton.styleFrom':
+        return ElevatedButton.styleFrom(
+          backgroundColor: arg('backgroundColor') as Color?,
+          foregroundColor: arg('foregroundColor') as Color?,
+          padding: arg('padding') as EdgeInsetsGeometry?,
+          elevation: (arg('elevation') as num?)?.toDouble(),
+          textStyle: arg('textStyle') as TextStyle?,
+          side: arg('side') as BorderSide?,
+        );
+      case 'TextButton.styleFrom':
+        return TextButton.styleFrom(
+          backgroundColor: arg('backgroundColor') as Color?,
+          foregroundColor: arg('foregroundColor') as Color?,
+          padding: arg('padding') as EdgeInsetsGeometry?,
+          elevation: (arg('elevation') as num?)?.toDouble(),
+          textStyle: arg('textStyle') as TextStyle?,
+          side: arg('side') as BorderSide?,
+        );
+      case 'OutlinedButton.styleFrom':
+        return OutlinedButton.styleFrom(
+          backgroundColor: arg('backgroundColor') as Color?,
+          foregroundColor: arg('foregroundColor') as Color?,
+          padding: arg('padding') as EdgeInsetsGeometry?,
+          elevation: (arg('elevation') as num?)?.toDouble(),
+          textStyle: arg('textStyle') as TextStyle?,
+          side: arg('side') as BorderSide?,
         );
       default:
         return null;
@@ -699,6 +769,40 @@ class BuiltinWidgets {
     'Icons.timeline': Icons.timeline, 'Icons.print': Icons.print, 'Icons.qr_code': Icons.qr_code,
     'Icons.bookmark': Icons.bookmark, 'Icons.bookmark_border': Icons.bookmark_border,
     'Icons.flag': Icons.flag, 'Icons.report': Icons.report,
+    'Icons.bolt': Icons.bolt, 'Icons.compare_arrows': Icons.compare_arrows,
+    'Icons.functions': Icons.functions, 'Icons.hourglass_bottom': Icons.hourglass_bottom,
+    'Icons.info': Icons.info, 'Icons.palette': Icons.palette,
+    'Icons.repeat': Icons.repeat, 'Icons.style': Icons.style,
+    'Icons.text_fields': Icons.text_fields, 'Icons.touch_app': Icons.touch_app,
+    'Icons.view_quilt': Icons.view_quilt,
+
+    // ═════ بداية كتلة الأيقونات المحيطية (outlined) — جديدة ═════
+    // ⚠️ تنويه صريح: هذه الأسماء من معرفتي العامة بمكتبة Icons في Flutter
+    // وليست مؤكَّدة بلقطة إكمال تلقائي من مشروعكم. إن ظهر عند البناء خطأ
+    // "The getter 'xxx' isn't defined for the type 'Icons'" فاحذفوا السطر
+    // المعني فقط من هذه الكتلة (كل أيقونة في سطر مستقل لهذا الغرض) وأخبروني.
+    'Icons.home_outlined': Icons.home_outlined,
+    'Icons.settings_outlined': Icons.settings_outlined,
+    'Icons.person_outline': Icons.person_outline,
+    'Icons.notifications_outlined': Icons.notifications_outlined,
+    'Icons.email_outlined': Icons.email_outlined,
+    'Icons.lock_outline': Icons.lock_outline,
+    'Icons.delete_outline': Icons.delete_outline,
+    'Icons.edit_outlined': Icons.edit_outlined,
+    'Icons.share_outlined': Icons.share_outlined,
+    'Icons.shopping_cart_outlined': Icons.shopping_cart_outlined,
+    'Icons.camera_alt_outlined': Icons.camera_alt_outlined,
+    'Icons.calendar_today_outlined': Icons.calendar_today_outlined,
+    'Icons.dashboard_outlined': Icons.dashboard_outlined,
+    'Icons.visibility_outlined': Icons.visibility_outlined,
+    'Icons.visibility_off_outlined': Icons.visibility_off_outlined,
+    'Icons.location_on_outlined': Icons.location_on_outlined,
+    'Icons.phone_outlined': Icons.phone_outlined,
+    'Icons.cloud_outlined': Icons.cloud_outlined,
+    'Icons.star_outline': Icons.star_outline,
+    'Icons.favorite_outline': Icons.favorite_outline,
+    'Icons.bookmark_outline': Icons.bookmark_outline,
+    // ═════ نهاية كتلة الأيقونات المحيطية ═════
 
     // ---- FontWeight ----
     'FontWeight.bold': FontWeight.bold, 'FontWeight.normal': FontWeight.normal,
@@ -706,7 +810,7 @@ class BuiltinWidgets {
     'FontWeight.w400': FontWeight.w400, 'FontWeight.w500': FontWeight.w500, 'FontWeight.w600': FontWeight.w600,
     'FontWeight.w700': FontWeight.w700, 'FontWeight.w800': FontWeight.w800, 'FontWeight.w900': FontWeight.w900,
 
-    // ---- تخطيط عام (موجودة سابقًا) ----
+    // ---- تخطيط عام ----
     'MainAxisAlignment.start': MainAxisAlignment.start, 'MainAxisAlignment.end': MainAxisAlignment.end,
     'MainAxisAlignment.center': MainAxisAlignment.center,
     'MainAxisAlignment.spaceBetween': MainAxisAlignment.spaceBetween,
@@ -725,7 +829,6 @@ class BuiltinWidgets {
     'Alignment.bottomLeft': Alignment.bottomLeft, 'Alignment.bottomRight': Alignment.bottomRight,
     'Alignment.centerLeft': Alignment.centerLeft, 'Alignment.centerRight': Alignment.centerRight,
 
-    // ---- تخطيط عام (جديدة) ----
     'BoxShape.circle': BoxShape.circle, 'BoxShape.rectangle': BoxShape.rectangle,
     'Axis.horizontal': Axis.horizontal, 'Axis.vertical': Axis.vertical,
     'WrapAlignment.start': WrapAlignment.start, 'WrapAlignment.center': WrapAlignment.center,
@@ -741,16 +844,28 @@ class BuiltinWidgets {
     'BottomNavigationBarType.fixed': BottomNavigationBarType.fixed,
     'BottomNavigationBarType.shifting': BottomNavigationBarType.shifting,
     'InputBorder.none': InputBorder.none,
+
+    // **جديد**: تثبيت/تعويم تسمية حقل الإدخال (InputDecoration.floatingLabelBehavior).
+    'FloatingLabelBehavior.always': FloatingLabelBehavior.always,
+    'FloatingLabelBehavior.auto': FloatingLabelBehavior.auto,
+    'FloatingLabelBehavior.never': FloatingLabelBehavior.never,
+
+    // **جديد**: ثوابت double الشائعة (كان double.infinity يُسبّب خطأ
+    // "متغيّر غير معروف: double" سابقًا).
+    'double.infinity': double.infinity,
+    'double.negativeInfinity': double.negativeInfinity,
+    'double.maxFinite': double.maxFinite,
+    'double.nan': double.nan,
   };
 
-  /// أسماء المُنشئات التي تُبنى كقيمة (وليست Widget) — يستخدمها المُفسِّر
-  /// لتقرير هل يستدعي [build] أو [buildValue].
+  /// أسماء المُنشئات التي تُبنى كقيمة (وليست Widget).
   static const Set<String> valueConstructors = {
-    'EdgeInsets.all', 'EdgeInsets.symmetric', 'EdgeInsets.only',
+    'EdgeInsets.all', 'EdgeInsets.symmetric', 'EdgeInsets.only', 'EdgeInsets.fromLTRB',
     'TextStyle', 'InputDecoration', 'BoxDecoration',
     'BorderRadius.circular', 'BorderRadius.only', 'Border.all', 'BoxShadow',
     'Offset', 'Duration', 'SliverGridDelegateWithFixedCrossAxisCount',
     'BottomNavigationBarItem', 'Color', 'TextEditingController',
     'OutlineInputBorder', 'UnderlineInputBorder', 'BorderSide', 'DropdownMenuItem',
+    'ElevatedButton.styleFrom', 'TextButton.styleFrom', 'OutlinedButton.styleFrom',
   };
 }

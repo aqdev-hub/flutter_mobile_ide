@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../console/logic/console_provider.dart';
 import '../../preview/logic/problems_provider.dart';
 import '../../project_explorer/logic/project_provider.dart';
+import '../../project_explorer/logic/project_state.dart';
 import '../../search/logic/project_search_provider.dart';
 import '../data/models/editor_tab.dart';
 import 'editor_tabs_state.dart';
@@ -22,7 +23,28 @@ final editorTabsProvider =
 class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
   final Ref _ref;
 
-  EditorTabsNotifier(this._ref) : super(const EditorTabsState());
+  EditorTabsNotifier(this._ref) : super(const EditorTabsState()) {
+    // **إصلاح**: كانت التبويبات المفتوحة (وCodeControllers الخاصة بها)
+    // تبقى كما هي بلا أي تغيير عند إغلاق المشروع الحالي أو فتح/إنشاء مشروع
+    // آخر تمامًا — لأن ProjectNotifier.openProjectAtPath يُحدِّث شجرة
+    // الملفات فقط، ولا يعرف أصلًا بوجود EditorTabsNotifier (فصل متعمَّد بين
+    // الـ providers). النتيجة: بعد إنشاء مشروع جديد، كان يظهر وكأن التطبيق
+    // "فتح المشروع القديم" فعليًا — بينما المشروع الجديد أُنشئ ويعمل بشكل
+    // صحيح تمامًا على القرص وفي شجرة الملفات؛ فقط تبويبات المحرر (وبالتبعية
+    // محتواها المعروض) كانت لا تزال تُشير لملفات المشروع *السابق*.
+    //
+    // الحل: الاستماع لتغيّرات projectProvider (بنفس نمط GitNotifier
+    // وProjectSearchNotifier أصلًا) ومقارنة **مسار الجذر** قبل/بعد. نُغلق كل
+    // التبويبات فقط عند تبديل حقيقي للمشروع (مسار مختلف تمامًا، أو الانتقال
+    // من/إلى "لا مشروع") — وليس عند `refreshProject()` (الذي يُعيد فتح
+    // *نفس* المسار لإعادة بناء الشجرة فقط، ويجب ألا يُفقِد أي تبويب مفتوح أو
+    // تعديل غير محفوظ).
+    _ref.listen<ProjectState>(projectProvider, (previous, next) {
+      if (previous?.root?.path != next.root?.path) {
+        closeAll();
+      }
+    });
+  }
 
   Future<void> openFile(String path, String name) async {
     final existing = state.tabs.where((t) => t.path == path);
@@ -109,13 +131,35 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
   }
 
   void closeTab(String path) {
-    final tabs = [...state.tabs]..removeWhere((t) => t.path == path);
+    EditorTab? closedTab;
+    final tabs = [...state.tabs]..removeWhere((t) {
+        final match = t.path == path;
+        if (match) closedTab = t;
+        return match;
+      });
     String? newActive = state.activePath;
     if (state.activePath == path) {
       newActive = tabs.isNotEmpty ? tabs.last.path : null;
     }
     state = EditorTabsState(tabs: tabs, activePath: newActive);
     _ref.read(problemsProvider.notifier).removeFile(path);
+    // **إصلاح تسريب موارد**: لم يكن يُستدعى controller.dispose() هنا سابقًا
+    // — أي إغلاق تبويب كان يترك CodeController حيًّا في الذاكرة (مع
+    // مستمعيه) دون أي مرجع يصل إليه بعد الآن.
+    closedTab?.controller.dispose();
+  }
+
+  /// يُغلق **كل** التبويبات المفتوحة دفعة واحدة، ويُحرِّر موارد كل
+  /// CodeController فيها، ويمسح لوحة Problems بالكامل — يُستدعى تلقائيًا
+  /// عند تبديل المشروع (راجع المستمع في المُنشئ أعلاه)، ويمكن استدعاؤه
+  /// يدويًا أيضًا مستقبلًا إن احتجنا ذلك (مثل زر "أغلق كل التبويبات").
+  void closeAll() {
+    if (state.tabs.isEmpty) return;
+    for (final tab in state.tabs) {
+      tab.controller.dispose();
+    }
+    state = const EditorTabsState();
+    _ref.read(problemsProvider.notifier).clearAll();
   }
 
   Future<void> saveActive() async {
