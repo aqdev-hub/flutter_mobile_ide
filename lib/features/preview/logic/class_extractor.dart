@@ -41,6 +41,11 @@ class ClassExtractor {
     return line;
   }
 
+  /// سطر الخطأ الفعلي: إن كان الخطأ ParseException بسطر مطلق (يُحسَب الآن من
+  /// بداية الملف لا من بداية الدالة) نستخدمه، وإلا نرجع لموضع الجملة المحيطة.
+  int? _issueLine(Object error, int? fallback) =>
+      error is ParseException && error.line != null ? error.line : fallback;
+
   List<WidgetClassDef> extractAll() {
     final defs = <WidgetClassDef>[];
     final classRegex = RegExp(r'class\s+(\w+)\s+extends\s+([\w<>]+)\s*\{');
@@ -142,11 +147,18 @@ class ClassExtractor {
       final initSource = match.group(2)!;
       final absoluteOffset = bodyStart + 1 + match.start;
       try {
-        fields.add(FieldDecl(name, DartSubsetParser.parseExpressionSource(initSource)));
+        fields.add(FieldDecl(
+          name,
+          DartSubsetParser.parseExpressionSource(
+            initSource,
+            startLine: _lineAt(bodyStart + match.end - initSource.length),
+            fileName: fileName,
+          ),
+        ));
       } catch (e) {
         issues.add(ExtractionIssue(
           'تعذّر تحليل تهيئة الحقل "$name" في الصنف "$className": $e',
-          line: _lineAt(absoluteOffset),
+          line: _issueLine(e, _lineAt(absoluteOffset)),
         ));
       }
     }
@@ -170,10 +182,19 @@ class ClassExtractor {
       final semicolon = rest.indexOf(';');
       final exprSrc = semicolon == -1 ? rest : rest.substring(0, semicolon);
       try {
-        return ([ReturnStmt(DartSubsetParser.parseExpressionSource(exprSrc))], null);
+        return (
+          [
+            ReturnStmt(DartSubsetParser.parseExpressionSource(
+              exprSrc,
+              startLine: _lineAt(bodyStart + 1 + arrowMatch.end),
+              fileName: fileName,
+            ))
+          ],
+          null
+        );
       } catch (e) {
         final msg = 'تعذّر تحليل تعبير build في الصنف "$className": $e';
-        issues.add(ExtractionIssue(msg, line: _lineAt(bodyStart + 1 + arrowMatch.end)));
+        issues.add(ExtractionIssue(msg, line: _issueLine(e, _lineAt(bodyStart + 1 + arrowMatch.end))));
         return (null, msg);
       }
     }
@@ -195,10 +216,17 @@ class ClassExtractor {
     }
     final bodyText = classBody.substring(start + 1, end);
     try {
-      return (DartSubsetParser.parseStatementsSource(bodyText), null);
+      return (
+        DartSubsetParser.parseStatementsSource(
+          bodyText,
+          startLine: _lineAt(bodyStart + 1 + start + 1),
+          fileName: fileName,
+        ),
+        null
+      );
     } catch (e) {
       final msg = 'تعذّر تحليل جسم build في الصنف "$className": $e';
-      issues.add(ExtractionIssue(msg, line: _lineAt(bodyStart + 1 + start)));
+      issues.add(ExtractionIssue(msg, line: _issueLine(e, _lineAt(bodyStart + 1 + start))));
       return (null, msg);
     }
   }
@@ -265,7 +293,13 @@ class ClassExtractor {
           final rest = classBody.substring(match.end);
           final semicolon = rest.indexOf(';');
           final exprSrc = semicolon == -1 ? rest : rest.substring(0, semicolon);
-          body = [ReturnStmt(DartSubsetParser.parseExpressionSource(exprSrc))];
+          body = [
+            ReturnStmt(DartSubsetParser.parseExpressionSource(
+              exprSrc,
+              startLine: _lineAt(bodyStart + 1 + match.end),
+              fileName: fileName,
+            ))
+          ];
         } else {
           final braceStart = match.end - 1;
           final braceEnd = _matchClosingBrace(classBody, braceStart);
@@ -277,13 +311,17 @@ class ClassExtractor {
             continue;
           }
           final bodyText = classBody.substring(braceStart + 1, braceEnd);
-          body = DartSubsetParser.parseStatementsSource(bodyText);
+          body = DartSubsetParser.parseStatementsSource(
+            bodyText,
+            startLine: _lineAt(bodyStart + 1 + braceStart + 1),
+            fileName: fileName,
+          );
         }
         methods.add(MethodDef(name, params, body, isAsync: isAsync));
       } catch (e) {
         issues.add(ExtractionIssue(
           'تعذّر تحليل الدالة "$name" في الصنف "$className": $e',
-          line: _lineAt(absoluteOffset),
+          line: _issueLine(e, _lineAt(absoluteOffset)),
         ));
       }
     }

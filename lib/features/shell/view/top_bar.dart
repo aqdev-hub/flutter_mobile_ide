@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../editor/logic/editor_tabs_provider.dart';
+import '../../editor/view/dialogs/unsaved_changes_dialog.dart';
 import '../../preview/logic/preview_provider.dart';
 import '../../project_explorer/logic/project_provider.dart';
 import '../../project_explorer/view/dialogs/pubspec_dependencies_dialog.dart';
@@ -96,7 +97,7 @@ class TopBar extends ConsumerWidget {
         break;
       case _MoreAction.closeTab:
         final active = ref.read(editorTabsProvider).activePath;
-        if (active != null) ref.read(editorTabsProvider.notifier).closeTab(active);
+        if (active != null) requestCloseTab(context, ref, active);
         break;
       case _MoreAction.managePackages:
         showPubspecDependenciesDialog(context, ref);

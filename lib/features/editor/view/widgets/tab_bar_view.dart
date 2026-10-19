@@ -5,6 +5,7 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../project_explorer/view/widgets/file_icon.dart';
 import '../../../project_explorer/data/models/file_node.dart';
 import '../../logic/editor_tabs_provider.dart';
+import '../dialogs/unsaved_changes_dialog.dart';
 
 class EditorTabBar extends ConsumerWidget {
   const EditorTabBar({super.key});
@@ -90,7 +91,7 @@ class _TabChip extends ConsumerWidget {
             ),
             const SizedBox(width: 6),
             InkWell(
-              onTap: () => ref.read(editorTabsProvider.notifier).closeTab(path),
+              onTap: () => requestCloseTab(context, ref, path),
               child: const Icon(Icons.close, size: 14, color: Colors.grey),
             ),
           ],

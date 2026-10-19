@@ -234,6 +234,14 @@ class Interpreter {
     }
   }
 
+  /// يضبط "الموضع الحالي" المستخدَم في رسائل الخطأ من عقدة الشجرة نفسها
+  /// (ملفها وسطرها المطلق)، بدل الاعتماد على آخر صنف بُني (كان يُنسب الخطأ
+  /// لملف خاطئ عندما يحدث أثناء تقييم وسيط يخص ودجت من ملف آخر).
+  void _markLocation(String? file, int line) {
+    if (file != null) _currentFile = file;
+    if (line > 0) _currentLine = line;
+  }
+
   String _formatLocation() {
     final file = _currentFile;
     final line = _currentLine;
@@ -324,7 +332,10 @@ class Interpreter {
       return buffer.toString();
     }
 
-    if (expr is IdentifierExpr) return _resolveIdentifier(expr.name, scope);
+    if (expr is IdentifierExpr) {
+      _markLocation(expr.file, expr.line);
+      return _resolveIdentifier(expr.name, scope);
+    }
 
     if (expr is AwaitExpr) {
       throw PreviewRuntimeException(
@@ -437,7 +448,7 @@ class Interpreter {
     if (expr is PropertyExpr) return _evalProperty(expr, scope);
 
     if (expr is CallExpr) {
-      if (expr.line > 0) _currentLine = expr.line;
+      _markLocation(expr.file, expr.line);
       return _evalCall(expr, scope);
     }
 
@@ -512,6 +523,8 @@ class Interpreter {
           return BuiltinWidgets.staticProperties[composed];
         }
         if (_knownStaticNamespaces.contains(targetName)) {
+          final targetIdent = expr.target as IdentifierExpr;
+          _markLocation(targetIdent.file, targetIdent.line);
           throw PreviewRuntimeException(
             'الخاصية "$composed" غير مُسجَّلة في قائمة الثوابت المدعومة — '
             'تحقّقوا من الاسم، أو أضيفوها يدويًا في builtin_widgets.dart (staticProperties).',
@@ -570,7 +583,11 @@ class Interpreter {
       return null;
     }
 
-    throw PreviewRuntimeException('استدعاء تابع غير مدعوم بعد: .${callee.name}()');
+    _markLocation(expr.file, expr.line);
+    throw PreviewRuntimeException(
+      'الاستدعاء ".${callee.name}()" على قيمة من نوع ${target.runtimeType} غير مدعوم في المعاينة '
+      'الحالية (قيد في المُفسِّر، وليس بالضرورة خطأ في كودك).',
+    );
   }
 
   (List<dynamic>, Map<String, dynamic>) _evalArgs(CallExpr expr, RuntimeScope scope) {
@@ -649,9 +666,11 @@ class Interpreter {
         }
         final widget = BuiltinWidgets.build(name, pos, named);
         if (widget != null) return widget;
+        _markLocation(expr.file, expr.line);
         return _errorWidget(
           'الصنف/الودجت "$name" غير معروف: ليس صنفًا معرَّفًا في مشروعكم، وليس '
-          'مُسجَّلًا في قائمة الودجتس المدعومة (builtin_widgets.dart)، ولا يوجد '
+          'مُسجَّلًا في قائمة الودجتس المدعومة (قيد في المعاينة الحالية: قد يكون الصنف معرَّفًا في مشروعك بصيغة لا يفهمها '
+          'المُفسِّر بعد، وليس بالضرورة خطأ في كودك)، ولا يوجد '
           'باسم هذا دالة مساعدة في الصنف الحالي.',
         );
     }
@@ -756,9 +775,10 @@ class Interpreter {
     }
     final widget = BuiltinWidgets.build(composedName, pos, named);
     if (widget != null) return widget;
+    _markLocation(expr.file, expr.line);
     return _errorWidget(
       'العنصر "$composedName" غير مُسجَّل في قائمة الودجتس/القيم المدعومة '
-      '(builtin_widgets.dart) — تحقّقوا من الاسم، أو أضيفوه يدويًا إن كان مطلوبًا فعليًا.',
+      '(قيد في المعاينة الحالية، وليس بالضرورة خطأ في كودك) — تحقّقوا من الاسم، أو أضيفوه يدويًا إن كان مطلوبًا فعليًا.',
     );
   }
 
@@ -847,7 +867,7 @@ class Interpreter {
   // ------------------------- Statement execution -------------------------
 
   void _exec(Stmt stmt, RuntimeScope scope) {
-    if (stmt.line > 0) _currentLine = stmt.line;
+    _markLocation(stmt.file, stmt.line);
     if (stmt is ExprStmt) {
       _eval(stmt.expr, scope);
       return;
@@ -1052,7 +1072,7 @@ class Interpreter {
   }
 
   Future<void> _execAsync(Stmt stmt, RuntimeScope scope) async {
-    if (stmt.line > 0) _currentLine = stmt.line;
+    _markLocation(stmt.file, stmt.line);
 
     if (stmt is ExprStmt) {
       await _evalMaybeAwait(stmt.expr, scope);

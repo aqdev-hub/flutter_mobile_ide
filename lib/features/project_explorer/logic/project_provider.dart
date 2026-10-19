@@ -10,6 +10,7 @@ import '../../console/logic/console_provider.dart';
 import '../data/models/file_node.dart';
 import '../data/models/recent_project.dart';
 import '../data/repositories/file_system_repository.dart';
+import 'fs_events.dart';
 import 'project_state.dart';
 
 final fileSystemRepositoryProvider = Provider((ref) => FileSystemRepository());
@@ -42,6 +43,10 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
 
   void _log(String message, {bool isError = false}) {
     _ref.read(consoleProvider.notifier).log(message, isError: isError);
+  }
+
+  void _emitFsChange(FsChange change) {
+    _ref.read(fsChangeProvider.notifier).state = change;
   }
 
   // ------------------------- المشاريع الحديثة -------------------------
@@ -174,9 +179,62 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
     }
   }
 
-  Future<void> refreshProject() async {
-    if (state.root == null) return;
-    await openProjectAtPath(state.root!.path);
+  /// يعيد قراءة الشجرة من القرص **مع الحفاظ على المجلدات المفتوحة**.
+  ///
+  /// **إصلاح**: كان يستدعي `openProjectAtPath` فيعيد بناء الشجرة بكل
+  /// المجلدات مطويّة (ويُظهر مؤشر التحميل بدل الشجرة) بعد أي إنشاء/إعادة
+  /// تسمية/حذف/لصق.
+  ///
+  /// [remapFrom]/[remapTo]: عند إعادة تسمية/نقل مجلد، تُحوَّل مسارات المجلدات
+  /// المفتوحة تحته إلى المسار الجديد حتى تبقى مفتوحة.
+  /// [alsoExpand]: مجلدات تُفتح بعد العملية (مثل مجلد وُضع فيه ملف جديد).
+  Future<void> refreshProject({
+    String? remapFrom,
+    String? remapTo,
+    Set<String> alsoExpand = const {},
+  }) async {
+    final current = state.root;
+    if (current == null) return;
+    try {
+      final expanded = <String>{
+        for (final path in _collectExpanded(current)) _remapPath(path, remapFrom, remapTo),
+        ...alsoExpand,
+      };
+      final fresh = await _repo.buildTree(current.path);
+      state = state.copyWith(root: _applyExpanded(fresh, expanded, isRoot: true), clearError: true);
+    } catch (e) {
+      state = state.copyWith(errorMessage: e.toString());
+      _log('تعذّر تحديث المشروع: $e', isError: true);
+    }
+  }
+
+  Set<String> _collectExpanded(FileNode root) {
+    final result = <String>{};
+    void walk(FileNode node) {
+      if (!node.isDirectory) return;
+      if (node.isExpanded) result.add(node.path);
+      for (final child in node.children) {
+        walk(child);
+      }
+    }
+
+    walk(root);
+    return result;
+  }
+
+  FileNode _applyExpanded(FileNode node, Set<String> expanded, {bool isRoot = false}) {
+    if (!node.isDirectory) return node;
+    return node.copyWith(
+      isExpanded: isRoot ? true : expanded.contains(node.path),
+      children: [for (final child in node.children) _applyExpanded(child, expanded)],
+    );
+  }
+
+  String _remapPath(String path, String? from, String? to) {
+    if (from == null || to == null) return path;
+    if (p.equals(path, from)) return to;
+    if (p.isWithin(from, path)) return p.join(to, p.relative(path, from: from));
+    return path;
   }
 
   /// يُغلق عرض المشروع الحالي (بدون حذف أي ملف فعلي وبدون إزالته من قائمة
@@ -219,7 +277,6 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
   }
 
   // ------------------------- شجرة الملفات (CRUD) -------------------------
-  // بلا تغيير عن النسخة السابقة.
 
   FileNode _mapTree(FileNode node, String targetPath, FileNode Function(FileNode) transform) {
     if (node.path == targetPath) return transform(node);
@@ -241,7 +298,7 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
     try {
       await _repo.createFile(parentPath, fileName);
       _log('تم إنشاء الملف: $fileName');
-      await refreshProject();
+      await refreshProject(alsoExpand: {parentPath});
     } catch (e) {
       _log('تعذّر إنشاء الملف: $e', isError: true);
       state = state.copyWith(errorMessage: e.toString());
@@ -252,7 +309,7 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
     try {
       await _repo.createDirectory(parentPath, dirName);
       _log('تم إنشاء المجلد: $dirName');
-      await refreshProject();
+      await refreshProject(alsoExpand: {parentPath});
     } catch (e) {
       _log('تعذّر إنشاء المجلد: $e', isError: true);
       state = state.copyWith(errorMessage: e.toString());
@@ -261,9 +318,11 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
 
   Future<void> rename(String path, String newName) async {
     try {
-      await _repo.rename(path, newName);
+      final newPath = await _repo.rename(path, newName);
+      if (newPath == path) return; // نفس الاسم — لا شيء يُفعل
+      _emitFsChange(FsChange.renamed(path, newPath));
       _log('تمت إعادة التسمية إلى: $newName');
-      await refreshProject();
+      await refreshProject(remapFrom: path, remapTo: newPath);
     } catch (e) {
       _log('تعذّرت إعادة التسمية: $e', isError: true);
       state = state.copyWith(errorMessage: e.toString());
@@ -273,6 +332,7 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
   Future<void> delete(String path, {required bool isDirectory}) async {
     try {
       await _repo.delete(path, isDirectory: isDirectory);
+      _emitFsChange(FsChange.deleted(path));
       _log('تم الحذف: $path');
       await refreshProject();
     } catch (e) {
@@ -295,17 +355,33 @@ class ProjectNotifier extends StateNotifier<ProjectState> {
     _log('تم القص إلى الحافظة');
   }
 
+  /// يلصق عنصر الحافظة داخل [destDirPath].
+  ///
+  /// **إصلاح فقدان بيانات**: القص يستخدم الآن نقلًا حقيقيًا (راجع
+  /// `FileSystemRepository.moveEntry`) بدل نسخ ثم حذف — فلا يُحذف المصدر
+  /// أبدًا إن كانت الوجهة هي نفسه، ولا يُكتب فوق عنصر موجود. والنسخ في نفس
+  /// المجلد ينتج اسمًا فريدًا ("name copy.ext") بدل الكتابة فوق الأصل.
   Future<void> pasteInto(String destDirPath) async {
     final clip = state.clipboard;
     if (clip == null) return;
     try {
-      await _repo.copyEntry(clip.path, destDirPath);
       if (clip.operation == ClipboardOperation.cut) {
-        await _repo.delete(clip.path, isDirectory: clip.isDirectory);
+        final newPath = await _repo.moveEntry(clip.path, destDirPath);
+        if (newPath == null) {
+          _log('العنصر موجود أصلًا في هذا المجلد — لا شيء للنقل.');
+          state = state.copyWith(clearClipboard: true);
+          return;
+        }
+        _emitFsChange(FsChange.renamed(clip.path, newPath));
+        state = state.copyWith(clearClipboard: true);
+        _log('تم النقل إلى: $destDirPath');
+        await refreshProject(remapFrom: clip.path, remapTo: newPath, alsoExpand: {destDirPath});
+      } else {
+        final newPath = await _repo.copyEntry(clip.path, destDirPath);
+        state = state.copyWith(clearClipboard: true);
+        _log('تم اللصق في: $destDirPath (${p.basename(newPath)})');
+        await refreshProject(alsoExpand: {destDirPath});
       }
-      state = state.copyWith(clearClipboard: true);
-      _log('تم اللصق في: $destDirPath');
-      await refreshProject();
     } catch (e) {
       _log('تعذّر اللصق: $e', isError: true);
       state = state.copyWith(errorMessage: e.toString());

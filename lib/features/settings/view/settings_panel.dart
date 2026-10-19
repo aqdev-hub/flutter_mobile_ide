@@ -49,6 +49,15 @@ class _SettingsPanelState extends ConsumerState<SettingsPanel> {
           value: settings.wordWrap,
           onChanged: (_) => notifier.toggleWordWrap(),
         ),
+        SwitchListTile(
+          title: const Text('تنسيق كود Dart تلقائيًا عند الحفظ'),
+          subtitle: const Text(
+            'يُعدِّل المسافات والأسطر الفارغة فقط (وليس الكود). يمكنك أيضًا التنسيق يدويًا من زر ✨ أسفل المحرر.',
+            style: TextStyle(fontSize: 11),
+          ),
+          value: settings.formatOnSave,
+          onChanged: (_) => notifier.toggleFormatOnSave(),
+        ),
         const SizedBox(height: 8),
         Text('حجم خط المحرر: ${settings.editorFontSize.toInt()}'),
         Slider(

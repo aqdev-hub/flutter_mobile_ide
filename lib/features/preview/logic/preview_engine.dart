@@ -75,7 +75,11 @@ class PreviewEngine {
     final exprSource = searchableSource.substring(argsStart, argsEnd);
 
     try {
-      final rootExpr = DartSubsetParser.parseExpressionSource(exprSource);
+      final rootExpr = DartSubsetParser.parseExpressionSource(
+        exprSource,
+        startLine: '\n'.allMatches(searchableSource.substring(0, argsStart)).length + 1,
+        fileName: mainFilePath.split(RegExp(r'[\\/]')).last,
+      );
       return PreviewBuildResult(classRegistry: registry, rootExpr: rootExpr);
     } catch (e) {
       return PreviewBuildResult(

@@ -30,8 +30,11 @@ const _kSymbols = [
 class _Lexer {
   final String src;
   int pos = 0;
-  int line = 1; // رقم السطر الحالي (1-based)، يزداد عند كل حرف سطر جديد
-  _Lexer(this.src);
+  int line; // رقم السطر الحالي (1-based)، يزداد عند كل حرف سطر جديد
+  final String? fileName;
+  // [startLine]: رقم السطر المطلق (داخل الملف الكامل) الذي يبدأ عنده [src]،
+  // لأن المستخرِج يمرّر جسم الدالة فقط لا الملف كله.
+  _Lexer(this.src, {int startLine = 1, this.fileName}) : line = startLine;
 
   List<_Token> tokenize() {
     final tokens = <_Token>[];
@@ -137,7 +140,7 @@ class _Lexer {
         }
         final exprSrc = src.substring(exprStart, pos);
         pos++; // تجاوز '}'
-        parts.add(DartSubsetParser.parseExpressionSource(exprSrc));
+        parts.add(DartSubsetParser.parseExpressionSource(exprSrc, startLine: line, fileName: fileName));
       } else if (src[pos] == r'$' && pos + 1 < src.length && RegExp(r'[A-Za-z_]').hasMatch(src[pos + 1])) {
         if (buffer.isNotEmpty) {
           parts.add(buffer.toString());
@@ -148,7 +151,9 @@ class _Lexer {
         while (pos < src.length && RegExp(r'[A-Za-z0-9_]').hasMatch(src[pos])) {
           pos++;
         }
-        parts.add(IdentifierExpr(src.substring(start, pos))..line = startLine);
+        parts.add(IdentifierExpr(src.substring(start, pos))
+          ..line = startLine
+          ..file = fileName);
       } else if (src[pos] == '\\' && pos + 1 < src.length) {
         buffer.write(src[pos + 1]);
         pos += 2;
@@ -170,16 +175,20 @@ class _Lexer {
 class DartSubsetParser {
   final List<_Token> _tokens;
   int pos = 0;
-  DartSubsetParser(this._tokens);
+  final String? _fileName;
+  DartSubsetParser(this._tokens, {String? fileName}) : _fileName = fileName;
 
-  static Expr parseExpressionSource(String source) {
-    final tokens = _Lexer(source).tokenize();
-    return DartSubsetParser(tokens)._expression();
+  /// [startLine]: رقم السطر المطلق الذي يبدأ عنده [source] داخل ملفه الأصلي،
+  /// و[fileName]: اسم الملف — يُسجَّلان على كل عقدة ناتجة لتبقى مواضع الأخطاء
+  /// مطابقة للكود الأصلي حتى لو مُرِّرت قطعة منه فقط.
+  static Expr parseExpressionSource(String source, {int startLine = 1, String? fileName}) {
+    final tokens = _Lexer(source, startLine: startLine, fileName: fileName).tokenize();
+    return DartSubsetParser(tokens, fileName: fileName)._expression();
   }
 
-  static List<Stmt> parseStatementsSource(String source) {
-    final tokens = _Lexer(source).tokenize();
-    final parser = DartSubsetParser(tokens);
+  static List<Stmt> parseStatementsSource(String source, {int startLine = 1, String? fileName}) {
+    final tokens = _Lexer(source, startLine: startLine, fileName: fileName).tokenize();
+    final parser = DartSubsetParser(tokens, fileName: fileName);
     final statements = <Stmt>[];
     while (!parser._check(_TokType.eof)) {
       statements.add(parser._statement());
@@ -222,6 +231,7 @@ class DartSubsetParser {
     final startLine = _current.line;
     final stmt = _statementInner();
     stmt.line = startLine;
+    stmt.file = _fileName;
     return stmt;
   }
 
@@ -448,13 +458,17 @@ class DartSubsetParser {
         final name = _advance().text;
         if (_check(_TokType.symbol, '(')) {
           final (positional, named) = _argumentList();
-          expr = CallExpr(PropertyExpr(expr, name), positional, named)..line = startLine;
+          expr = CallExpr(PropertyExpr(expr, name), positional, named)
+            ..line = startLine
+            ..file = _fileName;
         } else {
           expr = PropertyExpr(expr, name);
         }
       } else if (_check(_TokType.symbol, '(')) {
         final (positional, named) = _argumentList();
-        expr = CallExpr(expr, positional, named)..line = startLine;
+        expr = CallExpr(expr, positional, named)
+          ..line = startLine
+          ..file = _fileName;
       } else if (_match('[')) {
         final index = _expression();
         _expect(']');
@@ -567,7 +581,9 @@ class DartSubsetParser {
 
     if (_check(_TokType.identifier)) {
       final token = _advance();
-      return IdentifierExpr(token.text)..line = token.line;
+      return IdentifierExpr(token.text)
+        ..line = token.line
+        ..file = _fileName;
     }
 
     throw ParseException('تعبير غير متوقَّع: "${_current.text}"', line: _current.line);

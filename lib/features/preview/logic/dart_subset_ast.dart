@@ -28,6 +28,8 @@ class InterpolationExpr extends Expr {
 class IdentifierExpr extends Expr {
   final String name;
   int line = 0;
+  // الملف المصدري لهذا المعرِّف — لنسبة أخطاء حلّ الأسماء للملف الصحيح.
+  String? file;
   IdentifierExpr(this.name);
 }
 
@@ -89,6 +91,8 @@ class CallExpr extends Expr {
   // الجملة المحيطة وحدها، مهم خصوصًا لأن جملة return واحدة قد تحتوي شجرة
   // ودجتس متشعبة بالكامل على عدة أسطر.
   int line = 0;
+  // الملف المصدري لهذا الاستدعاء (اسم الملف فقط).
+  String? file;
   CallExpr(this.callee, this.positionalArgs, this.namedArgs) : id = _nextId++;
 }
 
@@ -150,6 +154,8 @@ class AwaitExpr extends Expr {
 /// الموحَّد في Interpreter._currentLine/_currentFile).
 abstract class Stmt {
   int line = 0;
+  // الملف المصدري لهذه الجملة (اسم الملف فقط) — يُملأ من المُحلِّل.
+  String? file;
 }
 
 class ExprStmt extends Stmt {

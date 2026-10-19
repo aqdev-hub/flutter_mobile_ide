@@ -7,8 +7,15 @@ import 'core/theme/app_theme.dart';
 import 'features/onboarding/view/onboarding_screen.dart';
 import 'features/settings/logic/settings_provider.dart';
 
-void main() {
-  runApp(const ProviderScope(child: FlutterMobileIdeApp()));
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // **إصلاح**: نقرأ الإعدادات المحفوظة قبل أول إطار، فلا تظهر شاشة الترحيب
+  // (أو الثيم الافتراضي) لحظة قبل اكتمال القراءة في كل تشغيل.
+  final initialSettings = await SettingsNotifier.loadFromPrefs();
+  runApp(ProviderScope(
+    overrides: [initialSettingsProvider.overrideWithValue(initialSettings)],
+    child: const FlutterMobileIdeApp(),
+  ));
 }
 
 class FlutterMobileIdeApp extends ConsumerWidget {
@@ -37,6 +44,10 @@ class _AppRoot extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final isLoaded = ref.watch(settingsProvider.select((s) => s.isLoaded));
+    // لا نقرّر بين الترحيب وبيئة العمل قبل اكتمال تحميل الإعدادات.
+    if (!isLoaded) return const Scaffold(body: SizedBox.shrink());
+
     final hasSeenOnboarding = ref.watch(settingsProvider.select((s) => s.hasSeenOnboarding));
     return hasSeenOnboarding ? const AppShell() : const OnboardingScreen();
   }

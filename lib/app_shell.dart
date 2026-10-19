@@ -6,6 +6,7 @@ import 'core/theme/app_theme.dart';
 import 'features/editor/logic/editor_tabs_provider.dart';
 import 'features/editor/view/widgets/code_editor_widget.dart';
 import 'features/editor/view/widgets/find_replace_panel.dart';
+import 'features/editor/view/widgets/suggestion_bar.dart';
 import 'features/editor/view/widgets/tab_bar_view.dart';
 import 'features/git/view/git_panel.dart';
 import 'features/preview/view/preview_panel.dart';
@@ -112,6 +113,12 @@ class _AppShellState extends ConsumerState<AppShell> {
                                 ? const _NoFileOpen()
                                 : CodeEditorWidget(key: ValueKey(activeTab.path), tab: activeTab),
                           ),
+                          // شريط الإكمال التلقائي والمساعدة والتنسيق (ملفات dart فقط).
+                          if (activeTab != null && activeTab.extension == '.dart')
+                            EditorSuggestionBar(
+                              key: ValueKey('suggestions_${activeTab.path}'),
+                              controller: activeTab.controller,
+                            ),
                         ] else
                           const Expanded(child: PreviewPanel()),
                         const BottomPanel(),
