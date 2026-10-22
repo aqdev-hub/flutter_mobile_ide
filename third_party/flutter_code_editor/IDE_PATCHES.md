@@ -1,0 +1,19 @@
+# تعديلات Flutter Mobile IDE على flutter_code_editor 0.3.5
+
+الأصل: https://github.com/akvelon/flutter-code-editor (Apache-2.0، ملف LICENSE مرفق).
+حُذفت منه مجلدات test/example/doc فقط. التعديلات (علّمناها بـ `IDE PATCH` في الكود):
+
+1. `lib/src/code_field/code_field.dart`
+   - `_onTextChanged` لا يعمل إلا إذا تغيّر النص فعلًا (كان يُعيد تقسيم النص
+     مرتين + setState عند كل تغيّر في التحديد).
+   - `_updatePopupOffset` لا يعمل إلا أثناء ظهور نافذة الإكمال (كان يبني
+     TextPainter للنص كاملًا + setState عند كل تغيّر في التحديد).
+   - `_HorizontalRevealBoundary`: يعترض `showOnScreen` من TextField ويُمرّر
+     التمرير الأفقي بقفزة مباشرة وهامش ثابت، بدل الحركة المتحركة التي كانت
+     تُحرّك المحتوى تحت إصبع المستخدم وتُسبب اهتزاز التحديد عند الحافة.
+   - `scrollPadding` الرأسي 24 بدل 0.
+2. `lib/src/gutter/gutter.dart`
+   - الهامش لا يُعاد بناؤه إلا إذا تغيّر `code` أو `analysisResult` (كان
+     يُعاد بناء جدول كل الأسطر عند كل تغيّر في التحديد).
+
+عند الترقية: أعد تطبيق هذه التعديلات يدويًا على النسخة الجديدة.
