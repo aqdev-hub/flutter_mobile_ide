@@ -116,7 +116,16 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
     tab.controller.selection = TextSelection.collapsed(offset: offset);
   }
 
+  /// آخر نص كامل عالجه [_onTabContentChanged] لكل controller. المستمع يُستدعى
+  /// أيضًا عند تغيّر التحديد فقط (عشرات المرات في الثانية أثناء سحب المقابض)،
+  /// فنتجاهل ما لم يتغير فيه النص حتى لا نُعيد جدولة التحليل ونقارن النص كل مرة.
+  final Expando<String> _lastSeenText = Expando<String>('lastSeenText');
+
   void _onTabContentChanged(CodeController controller) {
+    final fullText = controller.fullText;
+    if (identical(_lastSeenText[controller], fullText)) return;
+    _lastSeenText[controller] = fullText;
+
     final tabs = state.tabs;
     final index = tabs.indexWhere((t) => identical(t.controller, controller));
     if (index == -1) return;

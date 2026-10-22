@@ -55,7 +55,16 @@ class _AppShellState extends ConsumerState<AppShell> {
       }
     });
 
+    // ارتفاع لوحة المفاتيح الحقيقي. نقرؤه هنا (فوق Scaffold) ثم نمرّره للمعاينة،
+    // لأن Scaffold لن يُقلّص جسمه في وضع المعاينة (انظر resizeToAvoidBottomInset).
+    final keyboardInset = MediaQuery.viewInsetsOf(context).bottom;
+    final isPreview = _mainSegment == MainSegment.preview;
+
     return Scaffold(
+      // في وضع المعاينة: لا نُقلّص الواجهة عند ظهور الكيبورد، فيبقى إطار
+      // المحاكي بحجمه، ويطفو الكيبورد فوقه كما في هاتف حقيقي. أما في وضع
+      // المحرر فيبقى السلوك الافتراضي (تقليص المساحة لتبقى الكتابة مرئية).
+      resizeToAvoidBottomInset: !isPreview,
       body: SafeArea(
         child: Column(
           children: [
@@ -120,7 +129,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                               controller: activeTab.controller,
                             ),
                         ] else
-                          const Expanded(child: PreviewPanel()),
+                          Expanded(child: PreviewPanel(keyboardInset: keyboardInset)),
                         const BottomPanel(),
                       ],
                     ),
