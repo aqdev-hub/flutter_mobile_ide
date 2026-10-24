@@ -68,7 +68,10 @@ class SemanticChecker {
   final ProjectIndex index;
   SemanticChecker(this.index);
 
-  List<SemanticDiagnostic> check(FileModel file) => _FileCheck(index, file).run();
+  List<SemanticDiagnostic> check(FileModel file) {
+    if (file.skipSemantic) return const [];
+    return _FileCheck(index, file).run();
+  }
 }
 
 class _Env {

@@ -174,9 +174,29 @@ class ProjectIndex {
         ...cls.interfaces,
       ];
 
-  /// يبحث عن عضو في الصنف ثم في أسلافه من ملفات المشروع (extends/with/implements).
-  MemberLookup lookupMember(ClassInfo cls, String name, [Set<ClassInfo>? seen]) {
-    final visited = seen ?? <ClassInfo>{};
+  static const Set<String> _objectMembers = {'hashCode', 'runtimeType', 'toString', 'noSuchMethod'};
+
+  late final Set<String> _extendedTypes = {
+    for (final f in files.values) ...f.extendedTypes,
+  };
+
+  /// هل يُوسِّع أي `extension` في المشروع النوع [typeName]؟
+  bool hasExtensionOn(String typeName) => _extendedTypes.contains(typeName);
+
+  /// يبحث عن عضو في الصنف ثم في أسلافه من ملفات المشروع (extends/with/implements)،
+  /// ثم في أعضاء `Object` (toString/hashCode/...) التي يملكها كل صنف.
+  MemberLookup lookupMember(ClassInfo cls, String name) {
+    final r = _lookup(cls, name, <ClassInfo>{});
+    if (r.member != null) return r;
+    if (_objectMembers.contains(name)) {
+      final isMethod = name == 'toString' || name == 'noSuchMethod';
+      return MemberLookup(member: MemberInfo(name: name, kind: isMethod ? MemberKind.method : MemberKind.getter));
+    }
+    if (!r.inconclusive && hasExtensionOn(cls.name)) return const MemberLookup(inconclusive: true);
+    return r;
+  }
+
+  MemberLookup _lookup(ClassInfo cls, String name, Set<ClassInfo> visited) {
     if (!visited.add(cls)) return const MemberLookup();
 
     MemberInfo? best;
@@ -199,7 +219,7 @@ class ProjectIndex {
         inconclusive = true;
         continue;
       }
-      final r = lookupMember(parent, name, visited);
+      final r = _lookup(parent, name, visited);
       if (r.member != null) return r;
       if (r.inconclusive) inconclusive = true;
     }

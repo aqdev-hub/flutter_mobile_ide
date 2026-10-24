@@ -187,6 +187,14 @@ class FileModel {
   final int syntaxErrorCount;
   final int? firstSyntaxErrorLine;
 
+  /// أسماء الأنواع التي تُوسِّعها إعلانات `extension ... on T` في هذا الملف —
+  /// قد تضيف أعضاءً لا نراها في تعريف الصنف، فلا نجزم بغياب عضو في [T].
+  final List<String> extendedTypes;
+
+  /// ملفات `part`/`part of`: مكتبتها موزَّعة على عدة ملفات فلا نملك نطاق أسماء
+  /// صحيحًا لها بعد — لا نصدر تشخيصات دلالية عليها بدل إصدار تشخيصات خاطئة.
+  final bool skipSemantic;
+
   late final LineIndex lines = LineIndex(text);
 
   FileModel({
@@ -198,6 +206,8 @@ class FileModel {
     this.bodies = const [],
     this.syntaxErrorCount = 0,
     this.firstSyntaxErrorLine,
+    this.extendedTypes = const [],
+    this.skipSemantic = false,
   });
 }
 

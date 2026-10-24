@@ -45,8 +45,8 @@ class ProblemsPanel extends ConsumerWidget {
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: const BoxDecoration(border: Border(top: BorderSide(color: IdeColors.darkBorder))),
           child: const Text(
-            'أخطاء "صياغة" = أكّدها محلل Dart الرسمي. "قيد في المعاينة" = الصياغة سليمة لكن المُفسِّر الحالي لا يدعمها. '
-            'لا يوجد بعد فحص للأنواع والأسماء غير المعرَّفة.',
+            'أخطاء "صياغة" = أكّدها محلل Dart الرسمي. "دلالي" = تعارض مع تعريفات ملفات مشروعك الفعلية. '
+            '"قيد في المعاينة" = الصياغة سليمة لكن المُفسِّر الحالي لا يدعمها.',
             style: TextStyle(fontSize: 9, color: Colors.grey),
           ),
         ),
@@ -77,7 +77,11 @@ class _ProblemTile extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final (icon, color) = _icon;
-    final categoryLabel = problem.category == ProblemCategory.syntax ? 'صياغة' : 'قيد في المعاينة';
+    final categoryLabel = switch (problem.category) {
+      ProblemCategory.syntax => 'صياغة',
+      ProblemCategory.semantic => 'دلالي',
+      ProblemCategory.preview => 'قيد في المعاينة',
+    };
 
     return ListTile(
       dense: true,

@@ -118,7 +118,7 @@ TextSpan applySquiggles(TextSpan root, List<SquiggleRange> ranges) {
     return TextSpan(
       text: needsSplit ? null : text,
       children: [
-        if (needsSplit) ...pieces(text!, textStart),
+        if (needsSplit) ...pieces(text, textStart),
         ...?newChildren,
       ],
       style: span.style,
