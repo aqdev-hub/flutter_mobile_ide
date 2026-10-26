@@ -4,17 +4,30 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_theme.dart';
 import '../logic/console_provider.dart';
 
-class ConsolePanel extends ConsumerWidget {
+class ConsolePanel extends ConsumerStatefulWidget {
   const ConsolePanel({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<ConsolePanel> createState() => _ConsolePanelState();
+}
+
+class _ConsolePanelState extends ConsumerState<ConsolePanel> {
+  // يُنشأ مرة واحدة ويُتلف مع اللوحة (كان يُنشأ في كل build دون dispose).
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final lines = ref.watch(consoleProvider);
-    final scrollController = ScrollController();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (scrollController.hasClients) {
-        scrollController.jumpTo(scrollController.position.maxScrollExtent);
+      if (mounted && _scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
       }
     });
 
@@ -46,7 +59,7 @@ class ConsolePanel extends ConsumerWidget {
                   child: Text('لا توجد رسائل بعد', style: TextStyle(color: Colors.grey, fontSize: 12)),
                 )
               : ListView.builder(
-                  controller: scrollController,
+                  controller: _scrollController,
                   padding: const EdgeInsets.all(8),
                   itemCount: lines.length,
                   itemBuilder: (context, index) {

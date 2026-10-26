@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/constants/app_constants.dart';
+import 'core/widgets/keyboard_inset_scope.dart';
 import 'core/theme/app_theme.dart';
 import 'features/editor/logic/editor_tabs_provider.dart';
 import 'features/editor/view/widgets/code_editor_widget.dart';
@@ -9,6 +10,7 @@ import 'features/editor/view/widgets/find_replace_panel.dart';
 import 'features/editor/view/widgets/suggestion_bar.dart';
 import 'features/editor/view/widgets/tab_bar_view.dart';
 import 'features/git/view/git_panel.dart';
+import 'features/preview/logic/preview_provider.dart';
 import 'features/preview/view/preview_panel.dart';
 import 'features/project_explorer/logic/project_provider.dart';
 import 'features/project_explorer/logic/project_state.dart';
@@ -33,6 +35,8 @@ class _AppShellState extends ConsumerState<AppShell> {
   bool _sidebarVisible = true;
   SidebarPanel _sidebarPanel = SidebarPanel.explorer;
   MainSegment _mainSegment = MainSegment.editor;
+  // القسم الذي كان مفتوحًا لحظة بدء التشغيل؛ يُستعاد عند الإيقاف.
+  MainSegment? _segmentBeforeRun;
   bool _findOpen = false;
 
   @override
@@ -43,6 +47,21 @@ class _AppShellState extends ConsumerState<AppShell> {
     // نعرض أي خطأ في المشروع (فتح مجلد، إنشاء/حذف/إعادة تسمية) كـ SnackBar
     // فوري، بدل ترك المستخدم يظن أن شيئًا لم يحدث لمجرد أن لوحة الكونسول
     // السفلية مطوية افتراضيًا.
+    // نتذكّر القسم عند أول خروج من حالة الخمول (يُنفَّذ المستمع لحظة تغيّر الحالة،
+    // أي قبل أن ينقل زر التشغيل العرض إلى المعاينة)، ونعيده عند العودة للخمول
+    // لأي سبب (زر الإيقاف، أو تبديل المشروع).
+    ref.listen<PreviewStatus>(previewProvider.select((s) => s.status), (previous, next) {
+      if (previous == PreviewStatus.idle && next != PreviewStatus.idle) {
+        _segmentBeforeRun = _mainSegment;
+      } else if (next == PreviewStatus.idle && previous != PreviewStatus.idle) {
+        final restore = _segmentBeforeRun;
+        _segmentBeforeRun = null;
+        if (restore != null && restore != _mainSegment) {
+          setState(() => _mainSegment = restore);
+        }
+      }
+    });
+
     ref.listen<ProjectState>(projectProvider, (previous, next) {
       if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -55,7 +74,16 @@ class _AppShellState extends ConsumerState<AppShell> {
       }
     });
 
-    return Scaffold(
+    // ارتفاع الكيبورد يُقرأ عبر KeyboardInsetScope (فوق Scaffold) ويستهلكه
+    // PreviewPanel وحده، فلا يُعاد بناء الشل كله في كل إطار من حركة الكيبورد.
+    final isPreview = _mainSegment == MainSegment.preview;
+
+    return KeyboardInsetScope(
+      child: Scaffold(
+      // في وضع المعاينة: لا نُقلّص الواجهة عند ظهور الكيبورد، فيبقى إطار
+      // المحاكي بحجمه، ويطفو الكيبورد فوقه كما في هاتف حقيقي. أما في وضع
+      // المحرر فيبقى السلوك الافتراضي (تقليص المساحة لتبقى الكتابة مرئية).
+      resizeToAvoidBottomInset: !isPreview,
       body: SafeArea(
         child: Column(
           children: [
@@ -120,7 +148,7 @@ class _AppShellState extends ConsumerState<AppShell> {
                               controller: activeTab.controller,
                             ),
                         ] else
-                          const Expanded(child: PreviewPanel()),
+                          Expanded(child: PreviewPanel()),
                         const BottomPanel(),
                       ],
                     ),
@@ -130,6 +158,7 @@ class _AppShellState extends ConsumerState<AppShell> {
             ),
           ],
         ),
+      ),
       ),
     );
   }

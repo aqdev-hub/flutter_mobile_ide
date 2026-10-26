@@ -105,6 +105,9 @@ class PreviewNotifier extends StateNotifier<PreviewState> {
     }
 
     final result = PreviewEngine().build(dartFilesByPath: dartFiles, mainFilePath: mainPath!);
+    for (final note in result.notes) {
+      _ref.read(consoleProvider.notifier).log(note);
+    }
     if (result.hasError || result.rootExpr == null) {
       state = state.copyWith(status: PreviewStatus.error, errorMessage: result.errorMessage);
       _ref.read(consoleProvider.notifier).log('فشل التشغيل: ${result.errorMessage}', isError: true);

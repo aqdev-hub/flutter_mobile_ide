@@ -2,14 +2,20 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/theme/app_theme.dart';
+import '../../../core/widgets/keyboard_inset_scope.dart';
 import '../logic/preview_provider.dart';
 
 class PreviewPanel extends ConsumerWidget {
+  /// ارتفاع لوحة مفاتيح الجهاز الحقيقية يُقرأ من [KeyboardInsetScope] (موضوع
+  /// فوق Scaffold في AppShell). لا تُقلّص المعاينة؛ بل يُحسب الجزء المتقاطع مع
+  /// إطار المحاكي ويُمرَّر لداخله كـ viewInsets ليتصرف Scaffold المُفسَّر كما
+  /// في هاتف حقيقي.
   const PreviewPanel({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final previewState = ref.watch(previewProvider);
+    final keyboardInset = KeyboardInsetScope.of(context);
 
     return Container(
       color: IdeColors.darkSurface,
@@ -18,6 +24,7 @@ class PreviewPanel extends ConsumerWidget {
           PreviewStatus.idle => const _IdlePreview(),
           PreviewStatus.error => _ErrorPreview(message: previewState.errorMessage ?? 'خطأ غير معروف'),
           PreviewStatus.running => _DeviceFrame(
+              keyboardInset: keyboardInset,
               // ⚠️ لا يوجد أي مفتاح (Key) قسري هنا عمدًا — كان موجودًا سابقًا
               // (ValueKey(rebuildTick)) بهدف إجبار إعادة البناء، لكنه كان
               // السبب الجذري لمشكلة حقيقية: أي setState داخل شاشة فرعية
@@ -91,9 +98,36 @@ class _ErrorPreview extends ConsumerWidget {
 
 /// إطار يشبه جهاز الهاتف حول المحتوى المُشغَّل، ليُعطي إحساسًا بصريًا
 /// بأن هذه "معاينة تطبيق حقيقي" وليست جزءًا من واجهة المحرر نفسها.
-class _DeviceFrame extends StatelessWidget {
+///
+/// عند ظهور لوحة المفاتيح يبقى الإطار بحجمه، ويُمرَّر لداخله فقط الجزء من
+/// الكيبورد الذي يغطّي الإطار فعليًا (viewInsets.bottom)، فيرفع Scaffold
+/// المُفسَّر المحتوى تمامًا كما يحدث في تطبيق على هاتف حقيقي.
+class _DeviceFrame extends StatefulWidget {
   final Widget child;
-  const _DeviceFrame({super.key, required this.child});
+  final double keyboardInset;
+  const _DeviceFrame({required this.child, this.keyboardInset = 0});
+
+  @override
+  State<_DeviceFrame> createState() => _DeviceFrameState();
+}
+
+class _DeviceFrameState extends State<_DeviceFrame> {
+  static const double _bezel = 6;
+  final GlobalKey _frameKey = GlobalKey();
+
+  /// الجزء من الكيبورد المتقاطع مع المنطقة الداخلية للإطار (بعد الحواف).
+  /// موضع الإطار ثابت لأن Scaffold لا يُقلَّص في وضع المعاينة، فنقرأ موضعه
+  /// من آخر تخطيط (render box) بأمان.
+  double _overlap(double innerHeight) {
+    if (widget.keyboardInset <= 0) return 0;
+    final box = _frameKey.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return 0;
+    final frameBottom = box.localToGlobal(Offset(0, box.size.height)).dy;
+    final screenHeight = MediaQuery.sizeOf(context).height;
+    final keyboardTop = screenHeight - widget.keyboardInset;
+    final innerBottom = frameBottom - _bezel;
+    return (innerBottom - keyboardTop).clamp(0.0, innerHeight).toDouble();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -101,11 +135,13 @@ class _DeviceFrame extends StatelessWidget {
       final maxWidth = constraints.maxWidth * 0.92;
       final maxHeight = constraints.maxHeight * 0.94;
       final frameWidth = (maxHeight * 0.5) < maxWidth ? maxHeight * 0.5 : maxWidth;
+      final innerSize = Size(frameWidth - _bezel * 2, maxHeight - _bezel * 2);
 
       return Container(
+        key: _frameKey,
         width: frameWidth,
         height: maxHeight,
-        padding: const EdgeInsets.all(6),
+        padding: const EdgeInsets.all(_bezel),
         decoration: BoxDecoration(
           color: Colors.black,
           borderRadius: BorderRadius.circular(28),
@@ -114,8 +150,11 @@ class _DeviceFrame extends StatelessWidget {
         child: ClipRRect(
           borderRadius: BorderRadius.circular(22),
           child: MediaQuery(
-            data: MediaQueryData(size: Size(frameWidth - 12, maxHeight - 12)),
-            child: child,
+            data: MediaQueryData(
+              size: innerSize,
+              viewInsets: EdgeInsets.only(bottom: _overlap(innerSize.height)),
+            ),
+            child: widget.child,
           ),
         ),
       );

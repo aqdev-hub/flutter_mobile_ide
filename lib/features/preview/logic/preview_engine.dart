@@ -1,13 +1,23 @@
+import 'analyzer_front_end.dart';
+import 'class_extractor.dart';
 import 'dart_subset_ast.dart';
 import 'dart_subset_parser.dart';
-import 'class_extractor.dart';
+import 'preview_flags.dart';
 
 class PreviewBuildResult {
   final Map<String, WidgetClassDef> classRegistry;
   final Expr? rootExpr;
   final String? errorMessage;
 
-  const PreviewBuildResult({required this.classRegistry, this.rootExpr, this.errorMessage});
+  /// ملاحظات تشخيصية (أي محرك استُخدم ولماذا رجعنا للقديم) — تُعرض في Output.
+  final List<String> notes;
+
+  const PreviewBuildResult({
+    required this.classRegistry,
+    this.rootExpr,
+    this.errorMessage,
+    this.notes = const [],
+  });
 
   bool get hasError => errorMessage != null;
 }
@@ -15,6 +25,12 @@ class PreviewBuildResult {
 /// يجمّع كل ملفات Dart المتاحة (عادة تحت lib/) في سجلّ أصناف واحد، ثم
 /// يحدّد نقطة الدخول عبر تحليل `void main() { runApp(EXPR); }` داخل
 /// main.dart لاستخراج تعبير الودجت الجذري.
+///
+/// **واجهتان أماميتان** (راجع [kUseAnalyzerFrontEnd]):
+///  1. الجديدة: محلل Dart الرسمي عبر [AnalyzerFrontEnd] (صياغة Dart القياسية).
+///  2. القديمة: [ClassExtractor] + [DartSubsetParser] (regex + محلل مبسَّط).
+/// تُجرَّب الجديدة أولًا لكل ملف على حدة؛ إن تعذّرت (خطأ صياغة أو بنية غير
+/// مدعومة) يُستخدم القديم لهذا الملف فقط وتُسجَّل ملاحظة بالسبب.
 ///
 /// **رجوع متعمَّد عن محرّك dart_eval**: بعد اختبار فعلي حقيقي، اكتشفنا أن
 /// `flutter_eval` (الإصدار المتاح وقت هذا التطوير) يحتوي خللًا جوهريًا
@@ -28,26 +44,66 @@ class PreviewEngine {
     required String mainFilePath,
   }) {
     final registry = <String, WidgetClassDef>{};
+    final notes = <String>[];
+    var modernFiles = 0;
+    var legacyFiles = 0;
+
     for (final entry in dartFilesByPath.entries) {
-      try {
-        // اسم الملف فقط (بدون المسار الكامل) — يظهر في رسائل الخطأ الموحَّدة.
-        final fileName = entry.key.split(RegExp(r'[\\/]')).last;
-        final defs = ClassExtractor(entry.value, fileName: fileName).extractAll();
-        for (final def in defs) {
-          registry[def.name] = def;
+      // اسم الملف فقط (بدون المسار الكامل) — يظهر في رسائل الخطأ الموحَّدة.
+      final fileName = entry.key.split(RegExp(r'[\\/]')).last;
+      List<WidgetClassDef>? defs;
+
+      if (kUseAnalyzerFrontEnd) {
+        try {
+          final result = AnalyzerFrontEnd.extractFile(entry.value, fileName: fileName);
+          if (result.usable) {
+            defs = result.classes;
+            modernFiles++;
+          } else {
+            notes.add('$fileName: استُخدم المحرك القديم — ${result.unusableReason}');
+          }
+        } catch (e) {
+          notes.add('$fileName: استُخدم المحرك القديم — تعذّر المحرك الجديد: $e');
         }
-      } catch (_) {
-        // ملف به صياغة لا يفهمها المُستخرج بعد — يُتجاهل هذا الملف فقط
-        // حتى لا يمنع بقية المشروع من المعاينة.
       }
+
+      if (defs == null) {
+        try {
+          defs = ClassExtractor(entry.value, fileName: fileName).extractAll();
+          legacyFiles++;
+        } catch (_) {
+          // ملف به صياغة لا يفهمها المُستخرج بعد — يُتجاهل هذا الملف فقط
+          // حتى لا يمنع بقية المشروع من المعاينة.
+          continue;
+        }
+      }
+      for (final def in defs) {
+        registry[def.name] = def;
+      }
+    }
+    if (kUseAnalyzerFrontEnd) {
+      notes.insert(0, 'المحرك: analyzer ($modernFiles ملف) / القديم ($legacyFiles ملف)');
     }
 
     final mainSource = dartFilesByPath[mainFilePath];
     if (mainSource == null) {
-      return const PreviewBuildResult(
-        classRegistry: {},
+      return PreviewBuildResult(
+        classRegistry: const {},
         errorMessage: 'لم يتم العثور على main.dart في المشروع الحالي.',
+        notes: notes,
       );
+    }
+
+    final mainFileName = mainFilePath.split(RegExp(r'[\\/]')).last;
+
+    if (kUseAnalyzerFrontEnd) {
+      final issues = <FrontEndIssue>[];
+      final root = AnalyzerFrontEnd.extractRunAppRoot(mainSource, fileName: mainFileName, issues: issues);
+      if (root != null) {
+        return PreviewBuildResult(classRegistry: registry, rootExpr: root, notes: notes);
+      }
+      final why = issues.isEmpty ? 'لم يُعثر على runApp(...)' : issues.first.message;
+      notes.add('$mainFileName: جذر التطبيق عبر المحرك القديم — $why');
     }
 
     // نتجاهل التعليقات (// ...) قبل البحث عن runApp — بدون هذا، أي تعليق
@@ -61,6 +117,7 @@ class PreviewEngine {
       return PreviewBuildResult(
         classRegistry: registry,
         errorMessage: 'لم يتم العثور على استدعاء runApp() داخل main.dart.',
+        notes: notes,
       );
     }
 
@@ -70,6 +127,7 @@ class PreviewEngine {
       return PreviewBuildResult(
         classRegistry: registry,
         errorMessage: 'صياغة runApp() غير مكتملة أو غير مدعومة.',
+        notes: notes,
       );
     }
     final exprSource = searchableSource.substring(argsStart, argsEnd);
@@ -78,13 +136,14 @@ class PreviewEngine {
       final rootExpr = DartSubsetParser.parseExpressionSource(
         exprSource,
         startLine: '\n'.allMatches(searchableSource.substring(0, argsStart)).length + 1,
-        fileName: mainFilePath.split(RegExp(r'[\\/]')).last,
+        fileName: mainFileName,
       );
-      return PreviewBuildResult(classRegistry: registry, rootExpr: rootExpr);
+      return PreviewBuildResult(classRegistry: registry, rootExpr: rootExpr, notes: notes);
     } catch (e) {
       return PreviewBuildResult(
         classRegistry: registry,
         errorMessage: 'تعذّر تحليل تعبير runApp(): $e',
+        notes: notes,
       );
     }
   }
