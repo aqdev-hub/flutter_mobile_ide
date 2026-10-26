@@ -26,7 +26,11 @@ dependencies:
   # --- المحرر ---
   # flutter_code_editor: محرر أكواد جاهز يدعم line numbers، auto-indent،
   # auto-close للأقواس، تحديد متعدد، undo/redo، وتلوين نحوي عبر highlight.
-  flutter_code_editor: ^0.3.3
+  # ⚠️ نسخة محلية معدّلة من flutter_code_editor 0.3.5 (راجع
+  # third_party/flutter_code_editor/IDE_PATCHES.md) لإصلاح اهتزاز وبطء تحديد
+  # الكود يدويًا. لا تُحوَّل لنسخة pub.dev دون إعادة تطبيق التعديلات.
+  flutter_code_editor:
+    path: third_party/flutter_code_editor
   highlight: ^0.7.0 # قواعد التلوين النحوي (نستخدم تعريف dart)
   flutter_highlight: ^0.7.0 # الثيمات الجاهزة لتلوين الكود (داكن/فاتح)
 
