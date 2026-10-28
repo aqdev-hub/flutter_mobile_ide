@@ -20,9 +20,13 @@ import 'dart_subset_ast.dart';
 ///
 /// ما لا يُدعَم (يُرفَض برسالة "قيد في المعاينة" بسطره الصحيح بدل null صامت):
 /// cascade (`..`)، `try/catch`، `switch`، `do-while`، `is`، تعبيرات `throw`،
-/// العمليات البتّية، `++`/`--` كتعبير داخل تعبير، الكائنات العادية (غير
-/// الودجتس) وحقولها/دوالها static — وهذه الأخيرة هي موضوع الدفعة التالية
-/// (نموذج الكائنات).
+/// العمليات البتّية، `++`/`--` كتعبير داخل تعبير، setters وoperators، و
+/// enum/mixin/extension، ومُنشئات factory المعاد توجيهها (`= Other`).
+///
+/// **نموذج الكائنات**: كل صنف يُحوَّل (ودجت أو عادي) مع حقوله (بما فيها static)
+/// ومُنشئاته (معاملات موضعية/مسمّاة/افتراضية، this./super.، قائمة التهيئة،
+/// super(...)/this(...)، factory) ودواله (static وgetters بما فيها)، وتُسجَّل
+/// متغيّرات ودوال المستوى الأعلى. التنفيذ في widget_interpreter.dart.
 class AnalyzerFrontEnd {
   AnalyzerFrontEnd._();
 
@@ -41,12 +45,20 @@ class AnalyzerFrontEnd {
       (offset) => parsed.lineInfo.getLocation(offset).lineNumber,
     );
     for (final decl in parsed.unit.declarations) {
-      if (decl is ast.ClassDeclaration) converter.classDecl(decl);
+      if (decl is ast.ClassDeclaration) {
+        converter.classDecl(decl);
+      } else if (decl is ast.FunctionDeclaration) {
+        converter.topFunction(decl);
+      } else if (decl is ast.TopLevelVariableDeclaration) {
+        converter.topVariables(decl);
+      }
     }
     return FrontEndFileResult(
       classes: converter.classes,
       issues: converter.issues,
       hasSyntaxErrors: false,
+      globalVars: converter.globalVars,
+      globalFunctions: converter.globalFunctions,
     );
   }
 
@@ -99,10 +111,16 @@ class FrontEndFileResult {
   final List<FrontEndIssue> issues;
   final bool hasSyntaxErrors;
 
+  /// متغيّرات ودوال المستوى الأعلى (top-level) في الملف.
+  final Map<String, Expr?> globalVars;
+  final List<MethodDef> globalFunctions;
+
   const FrontEndFileResult({
     required this.classes,
     required this.issues,
     required this.hasSyntaxErrors,
+    this.globalVars = const {},
+    this.globalFunctions = const [],
   });
 
   bool get hasConversionErrors => issues.any((i) => i.isError);
@@ -131,6 +149,8 @@ class _Converter {
   final int Function(int offset) lineOf;
   final List<WidgetClassDef> classes = [];
   final List<FrontEndIssue> issues = [];
+  final Map<String, Expr?> globalVars = {};
+  final List<MethodDef> globalFunctions = [];
 
   _Converter(this.file, this.lineOf);
 
@@ -175,65 +195,41 @@ class _Converter {
     final isStateless = superName == 'StatelessWidget';
     final isStateful = superName == 'StatefulWidget';
     final isState = superName == 'State';
-    final isWidget = isStateless || isStateful;
+    final isObjectClass = !(isStateless || isStateful || isState);
 
-    final members = d.body.members;
     final fields = <FieldDecl>[];
     final methods = <MethodDef>[];
+    final ctors = <ConstructorDef>[];
     List<Stmt>? buildBody;
     String? buildParseError;
     String? stateClassName = isState ? superArg : null;
 
-    // معاملات المُنشئ الموضعية للودجتس (لربط الوسائط الموضعية بأسماء الحقول).
-    final positionalCtorParams = <String>[];
-    if (isWidget) {
-      for (final m in members) {
-        if (m is ast.ConstructorDeclaration && m.name == null) {
-          for (final p in m.parameters.parameters) {
-            final n = p.name;
-            if (n == null) continue;
-            if (p.isPositional) positionalCtorParams.add(n.lexeme);
-            if (p.defaultClause != null) {
-              issues.add(FrontEndIssue(
-                'الصنف $name: القيمة الافتراضية للمعامل "${n.lexeme}" في المُنشئ لا تُطبَّق في المعاينة بعد.',
-                line: lineOf(p.offset),
-              ));
-            }
-          }
-        }
-      }
-    }
-    for (final p in positionalCtorParams) {
-      fields.add(FieldDecl(p, null));
-    }
-
-    for (final m in members) {
+    for (final m in d.body.members) {
       if (m is ast.FieldDeclaration) {
-        if (m.isStatic) {
-          issues.add(FrontEndIssue('الصنف $name: حقل static غير مدعوم في المعاينة بعد.', line: lineOf(m.offset)));
-          continue;
-        }
         for (final v in m.fields.variables) {
           final fieldName = v.name.lexeme;
-          if (positionalCtorParams.contains(fieldName)) continue;
           try {
             final init = v.initializer;
-            fields.add(FieldDecl(fieldName, init == null ? null : expr(init)));
+            fields.add(FieldDecl(fieldName, init == null ? null : expr(init), isStatic: m.isStatic));
           } on UnsupportedConstruct catch (e) {
             issues.add(FrontEndIssue('الصنف $name، الحقل "$fieldName": ${e.message}', line: e.line, isError: true));
           }
         }
+      } else if (m is ast.ConstructorDeclaration) {
+        try {
+          ctors.add(_constructor(m));
+        } on UnsupportedConstruct catch (e) {
+          issues.add(FrontEndIssue('الصنف $name، المُنشئ: ${e.message}', line: e.line, isError: true));
+        }
       } else if (m is ast.MethodDeclaration) {
         final methodName = m.name.lexeme;
-        if (m.isGetter || m.isSetter || m.isOperator) {
-          issues.add(FrontEndIssue('الصنف $name: ${m.isGetter ? 'getter' : m.isSetter ? 'setter' : 'operator'} "$methodName" غير مدعوم في المعاينة بعد.', line: lineOf(m.offset)));
+        if (m.isSetter || m.isOperator) {
+          issues.add(FrontEndIssue(
+              'الصنف $name: ${m.isSetter ? 'setter' : 'operator'} "$methodName" غير مدعوم في المعاينة بعد.',
+              line: lineOf(m.offset)));
           continue;
         }
-        if (m.isStatic) {
-          issues.add(FrontEndIssue('الصنف $name: الدالة static "$methodName" غير مدعومة في المعاينة بعد.', line: lineOf(m.offset)));
-          continue;
-        }
-        if (methodName == 'createState') {
+        if (methodName == 'createState' && !m.isStatic) {
           stateClassName ??= _createdStateName(m);
           continue;
         }
@@ -241,26 +237,16 @@ class _Converter {
         if (fnBody is ast.EmptyFunctionBody) continue; // abstract
 
         try {
-          final params = m.parameters;
-          final names = <String>[];
-          var hasNamed = false;
-          for (final p in params?.parameters ?? const <ast.FormalParameter>[]) {
-            final n = p.name;
-            if (n == null) continue;
-            if (p.isNamed) {
-              hasNamed = true;
-              continue;
-            }
-            names.add(n.lexeme);
-          }
-          if (hasNamed) {
-            issues.add(FrontEndIssue('الصنف $name، الدالة "$methodName": الوسائط المسمّاة غير مدعومة في الدوال المساعدة بعد (تُهمَل عند الاستدعاء).', line: lineOf(m.offset)));
-          }
+          final paramDefs = _paramDefs(m.parameters);
+          final positionalNames = [
+            for (final p in paramDefs)
+              if (!p.isNamed) p.name,
+          ];
           var body = _functionBody(fnBody);
-          if (methodName == 'build') {
+          if (methodName == 'build' && !m.isStatic) {
             // المُفسِّر يربط BuildContext باسم "context" دائمًا: نُضيف اسمًا بديلًا
             // إن سمّاه المستخدم بغير ذلك (مثل ctx).
-            final alias = names.isNotEmpty ? names.first : null;
+            final alias = positionalNames.isNotEmpty ? positionalNames.first : null;
             if (alias != null && alias != 'context') {
               body = [
                 VarDeclStmt(alias, _ident('context', m.offset))
@@ -271,7 +257,15 @@ class _Converter {
             }
             buildBody = body;
           } else {
-            methods.add(MethodDef(methodName, names, body, isAsync: fnBody.isAsynchronous));
+            methods.add(MethodDef(
+              methodName,
+              positionalNames,
+              body,
+              isAsync: fnBody.isAsynchronous,
+              paramDefs: paramDefs,
+              isGetter: m.isGetter,
+              isStatic: m.isStatic,
+            ));
           }
         } on UnsupportedConstruct catch (e) {
           final msg = 'الصنف $name، الدالة "$methodName": ${e.message}';
@@ -281,19 +275,13 @@ class _Converter {
       }
     }
 
-    String? baseType;
-    if (isState) {
-      baseType = 'State';
-    } else if (isStateful) {
-      baseType = 'StatefulWidget';
-    } else if (isStateless) {
-      baseType = 'StatelessWidget';
-    } else {
-      baseType = superName;
-      buildParseError ??=
-          'الصنف $name ليس ودجت${superName == null ? '' : ' (يرث $superName)'} — دعم الأصناف العادية '
-          '(حقول/دوال/static/مُنشئات) قيد التطوير في المعاينة.';
-    }
+    final String? baseType = isState
+        ? 'State'
+        : isStateful
+            ? 'StatefulWidget'
+            : isStateless
+                ? 'StatelessWidget'
+                : superName;
 
     classes.add(WidgetClassDef(
       name: name,
@@ -304,7 +292,93 @@ class _Converter {
       buildParseError: buildParseError,
       methods: methods,
       sourceFile: file,
+      superName: superName,
+      isAbstract: d.abstractKeyword != null,
+      isObjectClass: isObjectClass,
+      constructors: ctors,
+      fromAnalyzer: true,
     ));
+  }
+
+  List<ParamDef> _paramDefs(ast.FormalParameterList? list) {
+    final out = <ParamDef>[];
+    for (final p in list?.parameters ?? const <ast.FormalParameter>[]) {
+      final n = p.name;
+      if (n == null) continue;
+      final def = p.defaultClause;
+      out.add(ParamDef(
+        n.lexeme,
+        isNamed: p.isNamed,
+        isRequired: p.isRequired,
+        isThis: p is ast.FieldFormalParameter,
+        isSuper: p is ast.SuperFormalParameter,
+        defaultValue: def == null ? null : expr(def.value),
+      ));
+    }
+    return out;
+  }
+
+  ConstructorDef _constructor(ast.ConstructorDeclaration c) {
+    if (c.redirectedConstructor != null) {
+      _unsupported('مُنشئ factory معاد التوجيه (= OtherClass)', c);
+    }
+    final inits = <FieldInit>[];
+    CtorCall? superCall;
+    CtorCall? redirect;
+    for (final i in c.initializers) {
+      if (i is ast.ConstructorFieldInitializer) {
+        inits.add(FieldInit(i.fieldName.name, expr(i.expression)));
+      } else if (i is ast.SuperConstructorInvocation) {
+        final (pos, named) = _args(i.argumentList);
+        superCall = CtorCall(i.constructorName?.name ?? '', pos, named);
+      } else if (i is ast.RedirectingConstructorInvocation) {
+        final (pos, named) = _args(i.argumentList);
+        redirect = CtorCall(i.constructorName?.name ?? '', pos, named);
+      }
+      // assert(...) في قائمة التهيئة يُتجاهل.
+    }
+    final body = c.body is ast.EmptyFunctionBody ? <Stmt>[] : _functionBody(c.body);
+    return ConstructorDef(
+      c.name?.lexeme ?? '',
+      params: _paramDefs(c.parameters),
+      initializers: inits,
+      superCall: superCall,
+      redirect: redirect,
+      body: body,
+      isFactory: c.factoryKeyword != null,
+    );
+  }
+
+  /// دالة عليا (top-level): تُسجَّل كدالة عامة يراها كل المشروع.
+  void topFunction(ast.FunctionDeclaration d) {
+    if (d.isGetter || d.isSetter) return;
+    final fnName = d.name.lexeme;
+    try {
+      final fn = d.functionExpression;
+      final paramDefs = _paramDefs(fn.parameters);
+      globalFunctions.add(MethodDef(
+        fnName,
+        [for (final p in paramDefs) if (!p.isNamed) p.name],
+        _functionBody(fn.body),
+        isAsync: fn.body.isAsynchronous,
+        paramDefs: paramDefs,
+      ));
+    } on UnsupportedConstruct catch (e) {
+      issues.add(FrontEndIssue('الدالة "$fnName": ${e.message}', line: e.line, isError: true));
+    }
+  }
+
+  /// متغيّرات عليا (مثل `final routes = {...}` أو `const x = 1`).
+  void topVariables(ast.TopLevelVariableDeclaration d) {
+    for (final v in d.variables.variables) {
+      final varName = v.name.lexeme;
+      try {
+        final init = v.initializer;
+        globalVars[varName] = init == null ? null : expr(init);
+      } on UnsupportedConstruct catch (e) {
+        issues.add(FrontEndIssue('المتغيّر "$varName": ${e.message}', line: e.line, isError: true));
+      }
+    }
   }
 
   /// اسم صنف الحالة الذي تُعيده `createState()` (مثل `_HomeState` من
@@ -435,10 +509,7 @@ class _Converter {
     return ExprStmt(expr(e));
   }
 
-  Expr _target(ast.Expression e) {
-    if (e is ast.PropertyAccess && e.target is ast.ThisExpression) return _ident(e.propertyName.name, e.offset);
-    return expr(e);
-  }
+  Expr _target(ast.Expression e) => expr(e);
 
   Stmt _assignment(ast.AssignmentExpression e) {
     final target = _target(e.leftHandSide);
@@ -511,7 +582,8 @@ class _Converter {
     if (e is ast.FunctionExpression) return _lambda(e);
     if (e is ast.AwaitExpression) return AwaitExpr(expr(e.expression));
     if (e is ast.AsExpression) return expr(e.expression);
-    if (e is ast.ThisExpression) _unsupported('استخدام this كقيمة', e);
+    if (e is ast.ThisExpression) return _ident('this', e.offset);
+    if (e is ast.SuperExpression) return _ident('super', e.offset);
     if (e is ast.CascadeExpression) _unsupported('cascade (..)', e);
     if (e is ast.IsExpression) _unsupported('is / is!', e);
     _unsupported('التعبير من نوع ${e.runtimeType}', e);
@@ -551,7 +623,6 @@ class _Converter {
   Expr _propertyAccess(ast.PropertyAccess e) {
     final target = e.target;
     if (target == null) _unsupported('وصول خاصية داخل cascade', e);
-    if (target is ast.ThisExpression) return _ident(e.propertyName.name, e.offset);
     final t = expr(target);
     final prop = PropertyExpr(t, e.propertyName.name);
     if (e.isNullAware) {
@@ -578,9 +649,8 @@ class _Converter {
     if (n.isCascaded) _unsupported('cascade (..)', n);
     final target = n.target;
     final name = n.methodName.name;
-    if (target is ast.SuperExpression) return LiteralExpr(null); // super.initState() ...
     final (pos, named) = _args(n.argumentList);
-    if (target == null || target is ast.ThisExpression) {
+    if (target == null) {
       return _call(_ident(name, n.methodName.offset), pos, named, n.offset);
     }
     final t = expr(target);

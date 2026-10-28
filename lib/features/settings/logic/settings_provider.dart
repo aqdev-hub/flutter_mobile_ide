@@ -69,7 +69,7 @@ final settingsProvider = StateNotifierProvider<SettingsNotifier, SettingsState>(
 /// إعدادات عامة بسيطة تُحفظ محليًا عبر SharedPreferences حتى لا يفقدها
 /// المستخدم عند إغلاق التطبيق.
 class SettingsNotifier extends StateNotifier<SettingsState> {
-  SettingsNotifier([SettingsState initial = const SettingsState()]) : super(initial);
+  SettingsNotifier([super.initial = const SettingsState()]);
 
   static const _darkModeKey = 'settings.dark_mode';
   static const _fontSizeKey = 'settings.font_size';

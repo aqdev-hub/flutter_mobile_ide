@@ -91,22 +91,71 @@ void main() {
       expect((first as VarDeclStmt).name, 'ctx');
     });
 
-    test('الصنف العادي (ليس ودجت) يحمل رسالة "قيد في المعاينة" لا null صامت', () {
-      final r = _extract('class AppColor { static const x = 1; }');
+    test('الصنف العادي يُسجَّل ككائن مع static وgetter ومُنشئ', () {
+      final r = _extract('''
+class AppColor {
+  static const x = 1;
+  int count = 0;
+  String get label => 'n';
+  AppColor(this.count);
+  AppColor.zero() : count = 0;
+  static int twice(int v, {int times = 2}) => v * times;
+}
+''');
+      expect(r.usable, isTrue, reason: r.unusableReason);
       final c = _cls(r, 'AppColor');
-      expect(c.buildBody, isNull);
-      expect(c.buildParseError, contains('قيد التطوير'));
+      expect(c.isObjectClass, isTrue);
+      expect(c.fields.where((f) => f.isStatic).map((f) => f.name), ['x']);
+      expect(c.methods.firstWhere((m) => m.name == 'label').isGetter, isTrue);
+      expect(c.methods.firstWhere((m) => m.name == 'twice').isStatic, isTrue);
+      expect(c.constructors.map((k) => k.name), ['', 'zero']);
+      expect(c.constructors.first.params.single.isThis, isTrue);
+      expect(c.constructors.last.initializers.single.name, 'count');
+      final twice = c.methods.firstWhere((m) => m.name == 'twice').paramDefs!;
+      expect(twice.last.isNamed, isTrue);
+      expect(twice.last.defaultValue, isNotNull);
     });
 
-    test('مُنشئ بمعامل موضعي يُربَط باسم الحقل', () {
+    test('مُنشئ الودجت يحمل ParamDef بما فيها الموضعية والمسمّاة والافتراضية', () {
       final r = _extract('''
 class Card1 extends StatelessWidget {
   final String title;
-  const Card1(this.title);
+  final int n;
+  const Card1(this.title, {super.key, this.n = 3});
   Widget build(BuildContext context) => Text(title);
 }
 ''');
-      expect(_cls(r, 'Card1').fields.first.name, 'title');
+      final ctor = _cls(r, 'Card1').constructors.single;
+      expect(ctor.params.map((p) => p.name), ['title', 'key', 'n']);
+      expect(ctor.params.first.isNamed, isFalse);
+      expect(ctor.params[1].isSuper, isTrue);
+      expect(ctor.params.last.defaultValue, isNotNull);
+    });
+
+    test('متغيّرات ودوال المستوى الأعلى تُسجَّل', () {
+      final r = _extract('''
+final routes = {'/a': 1};
+int add(int a, int b) => a + b;
+''');
+      expect(r.globalVars.containsKey('routes'), isTrue);
+      expect(r.globalFunctions.single.name, 'add');
+    });
+
+    test('this.x وsuper.m() تتحوّلان إلى PropertyExpr على this/super', () {
+      final r = _extract('''
+class A {
+  int x = 0;
+  void f() {
+    this.x = 2;
+    super.f();
+  }
+}
+''');
+      final body = _cls(r, 'A').methods.single.body;
+      final assign = body[0] as AssignStmt;
+      expect(((assign.target as PropertyExpr).target as IdentifierExpr).name, 'this');
+      final call = (body[1] as ExprStmt).expr as CallExpr;
+      expect((((call.callee as PropertyExpr).target) as IdentifierExpr).name, 'super');
     });
   });
 

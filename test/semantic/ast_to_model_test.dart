@@ -1,4 +1,4 @@
-import 'package:flutter_mobile_ide/features/semantic/data/project_model.dart';
+
 import 'package:flutter_mobile_ide/features/semantic/logic/ast_to_model.dart';
 import 'package:flutter_mobile_ide/features/semantic/logic/semantic_checker.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -145,7 +145,8 @@ class _SignUpState extends State<SignUp> {
 }
 ''';
 
-  List<SemanticDiagnostic> run(String screenSource, {String widgetSource = fieldSrc, Map<String, String> extra = const {}}) {
+  List<SemanticDiagnostic> run(String screenSource,
+      {String widgetSource = fieldSrc, Map<String, String> extra = const {}}) {
     final sources = <String, String>{
       colorPath: colorSrc,
       themePath: themeSrc,
@@ -155,12 +156,16 @@ class _SignUpState extends State<SignUp> {
       screenPath: screenSource,
       ...extra,
     };
-    final models = [for (final e in sources.entries) AstToModel.build(e.key, e.value)];
+    final models = [
+      for (final e in sources.entries) AstToModel.build(e.key, e.value)
+    ];
     final target = models.firstWhere((m) => m.path == screenPath);
     return analyze(models, target);
   }
 
-  test('الشاشة الصحيحة كاملة (AppColor + AppTheme().light + Theme.of + AppRoute + المتحكم) بلا أي تشخيص', () {
+  test(
+      'الشاشة الصحيحة كاملة (AppColor + AppTheme().light + Theme.of + AppRoute + المتحكم) بلا أي تشخيص',
+      () {
     final d = run(screen());
     expect([for (final x in d) '${x.code}: ${x.message}'], isEmpty);
   });
@@ -177,14 +182,18 @@ class _SignUpState extends State<SignUp> {
     expect(d.single.hint, contains('backgroundColor'));
   });
 
-  test('صنف معرَّف في المشروع وغير مستورَد => not_imported مع نص الاستيراد', () {
-    final head = imports.replaceAll("import 'package:my/core/constant/color.dart';\n", '');
+  test('صنف معرَّف في المشروع وغير مستورَد => not_imported مع نص الاستيراد',
+      () {
+    final head = imports.replaceAll(
+        "import 'package:my/core/constant/color.dart';\n", '');
     final d = run(screen(head: head));
     expect(codes(d), ['not_imported']);
     expect(d.single.hint, contains('package:my/core/constant/color.dart'));
   });
 
-  test('mycontroller لا يقبله المُنشئ => unknown_named_arg، ولا يُخلَط مع متغيّر', () {
+  test(
+      'mycontroller لا يقبله المُنشئ => unknown_named_arg، ولا يُخلَط مع متغيّر',
+      () {
     const widget = '''
 import 'package:flutter/material.dart';
 
@@ -228,7 +237,14 @@ import 'package:my/core/missing.dart';
 import 'package:ghost/ghost.dart';
 ''';
     final d = run(screen(head: head));
-    expect(codes(d), containsAll(['package_case_mismatch', 'import_case_mismatch', 'import_not_found', 'unknown_package']));
+    expect(
+        codes(d),
+        containsAll([
+          'package_case_mismatch',
+          'import_case_mismatch',
+          'import_not_found',
+          'unknown_package'
+        ]));
   });
 
   test('ملف part لا تُصدَر عليه تشخيصات دلالية (نطاقه موزَّع على ملفات)', () {
@@ -242,19 +258,26 @@ enum Mode { light, dark }
 ''';
     final modePath = lib('core/mode.dart');
     final ok = run(
-      screen(head: "$imports\nimport 'package:my/core/mode.dart';\n", color: 'Mode.light.name == Mode.values.first.name ? AppColor.backgroundColor : AppColor.backgroundColor'),
+      screen(
+          head: "$imports\nimport 'package:my/core/mode.dart';\n",
+          color:
+              'Mode.light.name == Mode.values.first.name ? AppColor.backgroundColor : AppColor.backgroundColor'),
       extra: {modePath: modeSrc},
     );
     expect(codes(ok), isEmpty);
 
     final bad = run(
-      screen(head: "$imports\nimport 'package:my/core/mode.dart';\n", color: 'Mode.dak'),
+      screen(
+          head: "$imports\nimport 'package:my/core/mode.dart';\n",
+          color: 'Mode.dak'),
       extra: {modePath: modeSrc},
     );
     expect(codes(bad), ['unknown_member']);
   });
 
-  test('toString/hashCode على كائن من المشروع، وextension على الصنف، لا يُعتبران أخطاء', () {
+  test(
+      'toString/hashCode على كائن من المشروع، وextension على الصنف، لا يُعتبران أخطاء',
+      () {
     const extSrc = '''
 import 'package:my/core/constant/color.dart';
 
@@ -266,7 +289,8 @@ extension AppColorX on AppColor {
     final d = run(
       screen(
         head: "$imports\nimport 'package:my/core/color_ext.dart';\n",
-        color: 'AppColor().label.isEmpty || AppTheme().hashCode == 1 || AppTheme().toString() == "" ? AppColor.backgroundColor : AppColor.backgroundColor',
+        color:
+            'AppColor().label.isEmpty || AppTheme().hashCode == 1 || AppTheme().toString() == "" ? AppColor.backgroundColor : AppColor.backgroundColor',
       ),
       extra: {extPath: extSrc},
     );
@@ -283,7 +307,8 @@ extension AppColorX on AppColor {
   });
 
   test('أخطاء الصياغة في الملف تُسجَّل في النموذج', () {
-    final broken = AstToModel.build(screenPath, 'class A {\n  void f() {\n    var x = ;\n  }\n}\n');
+    final broken = AstToModel.build(
+        screenPath, 'class A {\n  void f() {\n    var x = ;\n  }\n}\n');
     expect(broken.syntaxErrorCount, greaterThan(0));
     expect(broken.firstSyntaxErrorLine, 3);
   });

@@ -4,6 +4,7 @@ import 'package:flutter_highlight/themes/atom-one-dark.dart';
 import 'package:flutter_highlight/themes/atom-one-light.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/theme/app_theme.dart';
 import '../../../settings/logic/settings_provider.dart';
 import '../../data/models/editor_tab.dart';
 
@@ -54,6 +55,14 @@ class CodeEditorWidget extends ConsumerWidget {
           textStyle: TextStyle(color: Colors.grey.shade600, fontSize: settings.editorFontSize - 3),
         ),
         wrap: settings.wordWrap,
+        // ألوان واضحة للمؤشر والتحديد والمقابض: بدونها تعتمد على ألوان الثيم
+        // الافتراضية فتصعب رؤية حدود التحديد بدقة (حرف زائد/ناقص) على الخلفية الداكنة.
+        cursorColor: IdeColors.accentBlue,
+        textSelectionTheme: TextSelectionThemeData(
+          cursorColor: IdeColors.accentBlue,
+          selectionColor: IdeColors.accentBlue.withValues(alpha: 0.4),
+          selectionHandleColor: IdeColors.accentBlue,
+        ),
       ),
     );
   }

@@ -5,9 +5,15 @@
 /// **تحديث سابق**: أُضيفت عقد for/while/break/continue ودوال مساعدة متعددة
 /// داخل الصنف.
 ///
-/// **تحديث جديد**: أُضيف [AwaitExpr] + علم `isAsync` على [MethodDef] و
+/// **تحديث سابق**: أُضيف [AwaitExpr] + علم `isAsync` على [MethodDef] و
 /// [LambdaExpr] — دعم مبسَّط لِـ async/await (راجع التوثيق الكامل لحدود هذا
 /// الدعم في widget_interpreter.dart، قسم "دعم async/await المبسَّط").
+///
+/// **تحديث جديد (نموذج الكائنات)**: إضافات فقط (كلها اختيارية بقيم افتراضية،
+/// فلا يتأثر المُستخرِج القديم): [ParamDef] وتعريف المُنشئ [ConstructorDef]،
+/// و`isStatic` على [FieldDecl]، و`paramDefs/isGetter/isStatic` على [MethodDef]،
+/// و`superName/isAbstract/isObjectClass/constructors/fromAnalyzer` على
+/// [WidgetClassDef].
 library dart_subset_ast;
 
 // ------------------------- Expressions -------------------------
@@ -175,7 +181,7 @@ class VarDeclStmt extends Stmt {
 }
 
 class AssignStmt extends Stmt {
-  final Expr target; // IdentifierExpr أو PropertyExpr
+  final Expr target; // IdentifierExpr أو PropertyExpr أو IndexExpr
   final String op; // = | += | -=
   final Expr value;
   AssignStmt(this.target, this.op, this.value);
@@ -224,10 +230,66 @@ class ContinueStmt extends Stmt {}
 
 /// تعريف حقل داخل صنف (مثل `int _counter = 0;`) — يُستخرج مسبقًا بواسطة
 /// [ClassExtractor] وليس أثناء تنفيذ الجُمل العادية.
+///
+/// [isStatic]: حقل static (يُقيَّم كسولًا عند أول وصول، ويُخزَّن على مستوى الصنف).
 class FieldDecl {
   final String name;
   final Expr? initializer;
-  FieldDecl(this.name, this.initializer);
+  final bool isStatic;
+  FieldDecl(this.name, this.initializer, {this.isStatic = false});
+}
+
+/// معامل دالة/مُنشئ بكامل تفاصيله (للمسار الجديد على analyzer فقط).
+class ParamDef {
+  final String name;
+  final bool isNamed;
+  final bool isRequired;
+  final bool isThis; // this.x
+  final bool isSuper; // super.x
+  final Expr? defaultValue;
+  const ParamDef(
+    this.name, {
+    this.isNamed = false,
+    this.isRequired = false,
+    this.isThis = false,
+    this.isSuper = false,
+    this.defaultValue,
+  });
+}
+
+/// `x = expr` داخل قائمة تهيئة المُنشئ.
+class FieldInit {
+  final String name;
+  final Expr value;
+  FieldInit(this.name, this.value);
+}
+
+/// استدعاء `super(...)`/`super.named(...)` أو إعادة توجيه `this(...)`/`this.named(...)`.
+class CtorCall {
+  final String name; // '' للمُنشئ غير المسمّى
+  final List<Expr> positional;
+  final Map<String, Expr> named;
+  CtorCall(this.name, this.positional, this.named);
+}
+
+/// تعريف مُنشئ (عادي أو مسمّى أو factory).
+class ConstructorDef {
+  final String name; // '' = المُنشئ غير المسمّى
+  final List<ParamDef> params;
+  final List<FieldInit> initializers;
+  final CtorCall? superCall;
+  final CtorCall? redirect;
+  final List<Stmt> body;
+  final bool isFactory;
+  ConstructorDef(
+    this.name, {
+    this.params = const [],
+    this.initializers = const [],
+    this.superCall,
+    this.redirect,
+    this.body = const [],
+    this.isFactory = false,
+  });
 }
 
 /// تعريف دالة مساعدة داخل صنف (غير build/createState) — مثل:
@@ -238,20 +300,37 @@ class FieldDecl {
 /// [isAsync]: هل عُرِّفت هذه الدالة بـ `async` (مثل
 /// `Future<void> _loadData() async { ... }`)؟ إن كانت كذلك، تُنفَّذ عبر
 /// مسار تنفيذ مختلف (_invokeMethodAsync) يدعم await المبسَّط.
+///
+/// [paramDefs]: إن وُجدت (المسار الجديد) تُربَط الوسائط بها بما فيها المسمّاة
+/// والافتراضية؛ وإلا يُستخدم [params] (أسماء موضعية فقط، المسار القديم).
 class MethodDef {
   final String name;
   final List<String> params;
   final List<Stmt> body;
   final bool isAsync;
-  MethodDef(this.name, this.params, this.body, {this.isAsync = false});
+  final List<ParamDef>? paramDefs;
+  final bool isGetter;
+  final bool isStatic;
+  MethodDef(
+    this.name,
+    this.params,
+    this.body, {
+    this.isAsync = false,
+    this.paramDefs,
+    this.isGetter = false,
+    this.isStatic = false,
+  });
 }
 
-/// تمثيل مبسّط لصنف Widget مستخرَج من الكود المصدري: اسمه، حقوله (إن وُجدت
-/// كصنف State)، جسم دالة build كاملًا (قائمة جُمل وليس تعبيرًا واحدًا فقط —
-/// هذا ما يسمح بوجود متغيرات/حلقات/شروط قبل return)، ودواله المساعدة.
+/// تمثيل مبسّط لصنف مستخرَج من الكود المصدري: اسمه، حقوله، جسم دالة build
+/// كاملًا (قائمة جُمل وليس تعبيرًا واحدًا فقط — هذا ما يسمح بوجود
+/// متغيرات/حلقات/شروط قبل return)، ودواله المساعدة.
+///
+/// [isObjectClass]: صنف عادي (ليس Stateless/Stateful/State) — يُنشأ منه
+/// كائن حقيقي [InterpretedObject] بدل بناء ودجت.
 class WidgetClassDef {
   final String name;
-  final String? baseType; // StatelessWidget / StatefulWidget / State<...>
+  final String? baseType; // StatelessWidget / StatefulWidget / State<...> / اسم الأب
   final String? stateClassName; // لصنف Stateful: اسم صنف الحالة المرتبط به
   final List<FieldDecl> fields;
   final List<Stmt>? buildBody;
@@ -260,6 +339,12 @@ class WidgetClassDef {
   // اسم الملف (وليس المسار الكامل عادة) الذي عُرِّف فيه هذا الصنف — يُستخدَم
   // في تنسيق موضع الخطأ الموحَّد "اسم_الملف.dart — السطر N".
   final String? sourceFile;
+
+  final String? superName;
+  final bool isAbstract;
+  final bool isObjectClass;
+  final List<ConstructorDef> constructors;
+  final bool fromAnalyzer;
 
   WidgetClassDef({
     required this.name,
@@ -270,5 +355,10 @@ class WidgetClassDef {
     this.methods = const [],
     this.buildParseError,
     this.sourceFile,
+    this.superName,
+    this.isAbstract = false,
+    this.isObjectClass = false,
+    this.constructors = const [],
+    this.fromAnalyzer = false,
   });
 }

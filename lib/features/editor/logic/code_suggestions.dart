@@ -234,11 +234,11 @@ class CodeSuggestions {
 
       // قوالب
       if ('stless'.startsWith(lowerPartial) && partial.length >= 2) {
-        final tail = ');\n  }\n}';
+        const tail = ');\n  }\n}';
         add(
           CodeSuggestion(
             label: 'stless',
-            insertText: 'class MyWidget extends StatelessWidget {\n  Widget build(BuildContext context) {\n    return Container(${tail}',
+            insertText: 'class MyWidget extends StatelessWidget {\n  Widget build(BuildContext context) {\n    return Container($tail',
             kind: SuggestionKind.snippet,
             cursorBack: tail.length,
             detail: 'قالب StatelessWidget',
@@ -247,12 +247,12 @@ class CodeSuggestions {
         );
       }
       if ('stful'.startsWith(lowerPartial) && partial.length >= 2) {
-        final tail = ');\n  }\n}';
+        const tail = ');\n  }\n}';
         add(
           CodeSuggestion(
             label: 'stful',
             insertText:
-                'class MyWidget extends StatefulWidget {\n  State<MyWidget> createState() => _MyWidgetState();\n}\n\nclass _MyWidgetState extends State<MyWidget> {\n  Widget build(BuildContext context) {\n    return Container(${tail}',
+                'class MyWidget extends StatefulWidget {\n  State<MyWidget> createState() => _MyWidgetState();\n}\n\nclass _MyWidgetState extends State<MyWidget> {\n  Widget build(BuildContext context) {\n    return Container($tail',
             kind: SuggestionKind.snippet,
             cursorBack: tail.length,
             detail: 'قالب StatefulWidget + State',

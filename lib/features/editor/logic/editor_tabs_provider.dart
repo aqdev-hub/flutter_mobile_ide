@@ -11,7 +11,6 @@ import '../../project_explorer/logic/fs_events.dart';
 import '../../project_explorer/logic/project_provider.dart';
 import '../../project_explorer/logic/project_state.dart';
 import '../../search/logic/project_search_provider.dart';
-import '../../semantic/logic/semantic_provider.dart';
 import '../../settings/logic/settings_provider.dart';
 import '../data/models/editor_tab.dart';
 import 'dart_formatter.dart';
@@ -41,11 +40,6 @@ final editorTabsProvider =
 ///   يُستخدَم controller بعد التخلّص منه من قِبل حقل لم يُزَل من الشجرة بعد.
 class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
   final Ref _ref;
-
-  // آخر نص جُدوِل تحليله لكل controller: يمنع إعادة الجدولة عندما يُعلِن الـ
-  // controller عن تغيّر لا يمسّ النص (مثل وصول تسطير دلالي جديد) — وإلا دخلنا
-  // حلقة تحليل لا تنتهي.
-  final Expando<String> _scheduledText = Expando<String>();
 
   EditorTabsNotifier(this._ref) : super(const EditorTabsState()) {
     // إغلاق كل التبويبات عند تبديل المشروع فعليًا (مسار جذر مختلف)، وليس
@@ -90,7 +84,7 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
       state = state.copyWith(tabs: [...state.tabs, tab], activePath: path);
 
       if (extension == '.dart') {
-        _scheduleAnalysis(path, name, controller, content);
+        _ref.read(problemsProvider.notifier).scheduleAnalysis(path, name, content);
       }
     } catch (e) {
       _ref.read(consoleProvider.notifier).log('تعذّر فتح الملف $name: $e', isError: true);
@@ -122,7 +116,16 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
     tab.controller.selection = TextSelection.collapsed(offset: offset);
   }
 
+  /// آخر نص كامل عالجه [_onTabContentChanged] لكل controller. المستمع يُستدعى
+  /// أيضًا عند تغيّر التحديد فقط (عشرات المرات في الثانية أثناء سحب المقابض)،
+  /// فنتجاهل ما لم يتغير فيه النص حتى لا نُعيد جدولة التحليل ونقارن النص كل مرة.
+  final Expando<String> _lastSeenText = Expando<String>('lastSeenText');
+
   void _onTabContentChanged(CodeController controller) {
+    final fullText = controller.fullText;
+    if (identical(_lastSeenText[controller], fullText)) return;
+    _lastSeenText[controller] = fullText;
+
     final tabs = state.tabs;
     final index = tabs.indexWhere((t) => identical(t.controller, controller));
     if (index == -1) return;
@@ -134,23 +137,8 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
     }
 
     if (tab.extension == '.dart') {
-      final text = controller.fullText;
-      if (_scheduledText[controller] != text) _scheduleAnalysis(tab.path, tab.name, controller, text);
+      _ref.read(problemsProvider.notifier).scheduleAnalysis(tab.path, tab.name, controller.fullText);
     }
-  }
-
-  /// يجدول تحليل ملف dart (صياغة + دلالي + معاينة)، وعند وصول النتيجة يمرّر
-  /// الجزء الدلالي للـ controller ليرسم تسطيره.
-  void _scheduleAnalysis(String path, String name, CodeController controller, String content) {
-    _scheduledText[controller] = content;
-    _ref.read(problemsProvider.notifier).scheduleAnalysis(
-      path,
-      name,
-      content,
-      onAnalyzed: (problems) {
-        if (controller is IdeCodeController) controller.setSemanticProblems(problems, content);
-      },
-    );
   }
 
   void setActive(String path) {
@@ -276,7 +264,7 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
       updated.add(moved);
       if (state.activePath == tab.path) activePath = movedPath;
       if (moved.extension == '.dart') {
-        _scheduleAnalysis(movedPath, moved.name, moved.controller, moved.controller.fullText);
+        problems.scheduleAnalysis(movedPath, moved.name, moved.controller.fullText);
       }
     }
 
@@ -409,7 +397,6 @@ class EditorTabsNotifier extends StateNotifier<EditorTabsState> {
         state = state.copyWith(tabs: tabs);
       }
       _ref.read(projectSearchProvider.notifier).indexFile(tab.path, tab.name, content);
-      _ref.read(semanticServiceProvider).updateFileText(tab.path, content);
       _ref.read(consoleProvider.notifier).log('تم حفظ: ${tab.name}');
     } catch (e) {
       _ref.read(consoleProvider.notifier).log('تعذّر حفظ ${tab.name}: $e', isError: true);

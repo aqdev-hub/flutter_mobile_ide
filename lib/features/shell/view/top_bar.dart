@@ -69,7 +69,12 @@ class TopBar extends ConsumerWidget {
             icon: const Icon(Icons.save_outlined, size: 20),
             onPressed: () => ref.read(editorTabsProvider.notifier).saveActive(),
           ),
-          _RunButton(status: previewStatus),
+          _RunButton(
+            status: previewStatus,
+            // بعد التشغيل ننتقل مباشرة إلى نافذة المعاينة (نجح التشغيل أم فشل،
+            // فرسالة الخطأ وزر «إعادة المحاولة» تظهران هناك).
+            onAfterRun: () => onSegmentChanged(MainSegment.preview),
+          ),
           PopupMenuButton<_MoreAction>(
             tooltip: 'المزيد',
             icon: const Icon(Icons.more_vert, size: 20),
@@ -176,7 +181,8 @@ class _StatusPill extends StatelessWidget {
 
 class _RunButton extends ConsumerWidget {
   final PreviewStatus status;
-  const _RunButton({required this.status});
+  final VoidCallback onAfterRun;
+  const _RunButton({required this.status, required this.onAfterRun});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -188,11 +194,14 @@ class _RunButton extends ConsumerWidget {
         color: isRunning ? IdeColors.stopRed : IdeColors.runGreen,
         size: 26,
       ),
-      onPressed: () {
+      onPressed: () async {
         if (isRunning) {
           ref.read(previewProvider.notifier).stop();
         } else {
-          ref.read(previewProvider.notifier).run();
+          await ref.read(previewProvider.notifier).run();
+          // ننتقل إلى المعاينة بعد انتهاء run (نجح أم فشل) حتى لا تُعرض
+          // حالة «لم يتم التشغيل» لحظيًا؛ والخطأ يظهر هناك مع زر إعادة المحاولة.
+          if (context.mounted) onAfterRun();
         }
       },
     );

@@ -12,11 +12,17 @@ class PreviewBuildResult {
   /// ملاحظات تشخيصية (أي محرك استُخدم ولماذا رجعنا للقديم) — تُعرض في Output.
   final List<String> notes;
 
+  /// متغيّرات ودوال المستوى الأعلى (top-level) من كل ملفات المشروع (المحرك الجديد فقط).
+  final Map<String, Expr?> globalVars;
+  final Map<String, MethodDef> globalFunctions;
+
   const PreviewBuildResult({
     required this.classRegistry,
     this.rootExpr,
     this.errorMessage,
     this.notes = const [],
+    this.globalVars = const {},
+    this.globalFunctions = const {},
   });
 
   bool get hasError => errorMessage != null;
@@ -45,6 +51,8 @@ class PreviewEngine {
   }) {
     final registry = <String, WidgetClassDef>{};
     final notes = <String>[];
+    final globalVars = <String, Expr?>{};
+    final globalFunctions = <String, MethodDef>{};
     var modernFiles = 0;
     var legacyFiles = 0;
 
@@ -58,6 +66,10 @@ class PreviewEngine {
           final result = AnalyzerFrontEnd.extractFile(entry.value, fileName: fileName);
           if (result.usable) {
             defs = result.classes;
+            globalVars.addAll(result.globalVars);
+            for (final fn in result.globalFunctions) {
+              globalFunctions[fn.name] = fn;
+            }
             modernFiles++;
           } else {
             notes.add('$fileName: استُخدم المحرك القديم — ${result.unusableReason}');
@@ -100,7 +112,13 @@ class PreviewEngine {
       final issues = <FrontEndIssue>[];
       final root = AnalyzerFrontEnd.extractRunAppRoot(mainSource, fileName: mainFileName, issues: issues);
       if (root != null) {
-        return PreviewBuildResult(classRegistry: registry, rootExpr: root, notes: notes);
+        return PreviewBuildResult(
+          classRegistry: registry,
+          rootExpr: root,
+          notes: notes,
+          globalVars: globalVars,
+          globalFunctions: globalFunctions,
+        );
       }
       final why = issues.isEmpty ? 'لم يُعثر على runApp(...)' : issues.first.message;
       notes.add('$mainFileName: جذر التطبيق عبر المحرك القديم — $why');
@@ -138,7 +156,13 @@ class PreviewEngine {
         startLine: '\n'.allMatches(searchableSource.substring(0, argsStart)).length + 1,
         fileName: mainFileName,
       );
-      return PreviewBuildResult(classRegistry: registry, rootExpr: rootExpr, notes: notes);
+      return PreviewBuildResult(
+        classRegistry: registry,
+        rootExpr: rootExpr,
+        notes: notes,
+        globalVars: globalVars,
+        globalFunctions: globalFunctions,
+      );
     } catch (e) {
       return PreviewBuildResult(
         classRegistry: registry,

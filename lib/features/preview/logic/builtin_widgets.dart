@@ -428,20 +428,6 @@ class BuiltinWidgets {
           activeColor: arg('activeColor') as Color?,
         );
 
-      case 'Radio':
-        {
-          final onChangedCallable = arg('onChanged');
-          return Radio<dynamic>(
-            value: arg('value'),
-            groupValue: arg('groupValue'),
-            onChanged: (dynamic newValue) {
-              if (onChangedCallable is InterpretedCallable) {
-                onChangedCallable.call([newValue]);
-              }
-            },
-          );
-        }
-
       case 'Slider':
         {
           final onChangedCallable = arg('onChanged');

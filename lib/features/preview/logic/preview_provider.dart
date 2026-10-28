@@ -116,6 +116,8 @@ class PreviewNotifier extends StateNotifier<PreviewState> {
 
     final interpreter = Interpreter(
       classRegistry: result.classRegistry,
+      globalVars: result.globalVars,
+      globalFunctions: result.globalFunctions,
       log: (msg, {isError = false}) => _ref.read(consoleProvider.notifier).log(msg, isError: isError),
       onStateChanged: requestRebuild,
       // جذر المشروع المفتوح — لحلّ مسارات Image.asset(...) النسبية.

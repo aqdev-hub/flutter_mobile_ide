@@ -52,6 +52,10 @@ class _EditorSuggestionBarState extends ConsumerState<EditorSuggestionBar> {
 
   void _onChanged() {
     if (!mounted) return;
+    // أثناء تحديد نص (سحب المقابض) لا توجد اقتراحات أصلًا؛ لا داعي لإعادة بناء
+    // الشريط عند كل تغيّر في التحديد.
+    final sel = widget.controller.selection;
+    if ((!sel.isValid || !sel.isCollapsed) && identical(_result, SuggestionResult.empty)) return;
     final phase = SchedulerBinding.instance.schedulerPhase;
     if (phase == SchedulerPhase.idle || phase == SchedulerPhase.postFrameCallbacks) {
       setState(_recompute);
