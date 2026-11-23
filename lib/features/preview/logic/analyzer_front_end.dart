@@ -1,0 +1,999 @@
+import 'package:analyzer/dart/analysis/utilities.dart';
+import 'package:analyzer/dart/ast/ast.dart' as ast;
+
+import 'dart_subset_ast.dart';
+
+/// واجهة المُفسِّر الأمامية المبنية على محلل Dart الرسمي (analyzer، تحليل نحوي
+/// فقط): تقرأ **صياغة Dart القياسية كاملة** وتُنتج نفس عقد AST الخاصة بالمُفسِّر
+/// ([dart_subset_ast.dart]) — فيبقى المُفسِّر نفسه كما هو دون تعديل.
+///
+/// ما يُحوَّل بالتبسيط (desugaring) إلى عقد موجودة أصلًا:
+///  - `a ?? b`، `a?.b`، `a?.f()`، `a ??= b`: إلى تعبير شرطي. **يُقيَّم الطرف
+///    الأيسر مرتين**، لذلك لا يُقبل إلا إن كان خاليًا من الاستدعاءات
+///    (معرّف/خاصية/فهرسة/ثابت) وإلا يُرفَض بوضوح.
+///  - `a!` و`x as T`: إلى `x`.
+///  - `...xs` و`if (c) x` و`if (c) ...xs` داخل القوائم: إلى `for` عنصرية.
+///  - `*=` و`/=` و`%=`: إلى `x = x * v`.
+///  - الدوال المحلية: إلى متغير يحمل lambda.
+///  - `this.x`: إلى `x` (الحقول تُحلّ بالاسم في المُفسِّر).
+///  - `super.method()`: إلى لا شيء (null).
+///
+/// ما لا يُدعَم (يُرفَض برسالة "قيد في المعاينة" بسطره الصحيح بدل null صامت):
+/// cascade (`..`)، `try/catch`، `switch`، `do-while`، `is`، تعبيرات `throw`،
+/// العمليات البتّية، `++`/`--` كتعبير داخل تعبير، setters وoperators، و
+/// enum/mixin/extension، ومُنشئات factory المعاد توجيهها (`= Other`).
+///
+/// **نموذج الكائنات**: كل صنف يُحوَّل (ودجت أو عادي) مع حقوله (بما فيها static)
+/// ومُنشئاته (معاملات موضعية/مسمّاة/افتراضية، this./super.، قائمة التهيئة،
+/// super(...)/this(...)، factory) ودواله (static وgetters بما فيها)، وتُسجَّل
+/// متغيّرات ودوال المستوى الأعلى. التنفيذ في widget_interpreter.dart.
+class AnalyzerFrontEnd {
+  AnalyzerFrontEnd._();
+
+  /// يحوّل ملفًا واحدًا. لا يرمي استثناءً؛ النتيجة تصف ما حدث.
+  static FrontEndFileResult extractFile(String source, {required String fileName}) {
+    final parsed = parseString(content: source, throwIfDiagnostics: false);
+    if (parsed.errors.isNotEmpty) {
+      return FrontEndFileResult(
+        classes: const [],
+        issues: const [],
+        hasSyntaxErrors: true,
+      );
+    }
+    final converter = _Converter(
+      fileName,
+      (offset) => parsed.lineInfo.getLocation(offset).lineNumber,
+    );
+    for (final decl in parsed.unit.declarations) {
+      if (decl is ast.ClassDeclaration) {
+        converter.classDecl(decl);
+      } else if (decl is ast.FunctionDeclaration) {
+        converter.topFunction(decl);
+      } else if (decl is ast.TopLevelVariableDeclaration) {
+        converter.topVariables(decl);
+      } else if (decl is ast.EnumDeclaration) {
+        converter.enumDecl(decl);
+      }
+    }
+    return FrontEndFileResult(
+      classes: converter.classes,
+      issues: converter.issues,
+      hasSyntaxErrors: false,
+      globalVars: converter.globalVars,
+      globalFunctions: converter.globalFunctions,
+    );
+  }
+
+  /// تعبير الودجت الجذري داخل `runApp(...)` في دالة `main`، أو null إن لم
+  /// يوجد/تعذّر تحويله ([issues] يُملأ بالسبب).
+  static Expr? extractRunAppRoot(String source, {required String fileName, List<FrontEndIssue>? issues}) {
+    final parsed = parseString(content: source, throwIfDiagnostics: false);
+    if (parsed.errors.isNotEmpty) return null;
+    final converter = _Converter(
+      fileName,
+      (offset) => parsed.lineInfo.getLocation(offset).lineNumber,
+    );
+    try {
+      for (final decl in parsed.unit.declarations) {
+        if (decl is! ast.FunctionDeclaration || decl.name.lexeme != 'main') continue;
+        final body = decl.functionExpression.body;
+        final candidates = <ast.Expression>[];
+        if (body is ast.ExpressionFunctionBody) {
+          candidates.add(body.expression);
+        } else if (body is ast.BlockFunctionBody) {
+          for (final s in body.block.statements) {
+            if (s is ast.ExpressionStatement) candidates.add(s.expression);
+          }
+        }
+        for (final e in candidates) {
+          final call = e is ast.AwaitExpression ? e.expression : e;
+          if (call is ast.MethodInvocation && call.target == null && call.methodName.name == 'runApp') {
+            final args = call.argumentList.arguments;
+            if (args.isEmpty) return null;
+            return converter.expr(args.first.argumentExpression);
+          }
+        }
+      }
+    } on UnsupportedConstruct catch (e) {
+      issues?.add(FrontEndIssue(e.message, line: e.line, isError: true));
+    }
+    return null;
+  }
+
+  /// جمل `main` التي تسبق `runApp(...)` (مثل `final prefs = await SharedPreferences.getInstance();`):
+  /// تُنفَّذ قبل بناء الجذر وتبقى متغيّراتها متاحة لتعبير runApp. `WidgetsFlutterBinding.*` يُتخطّى.
+  /// أي جملة غير مدعومة => لا شيء (يبقى السلوك القديم).
+  static List<Stmt> extractMainPrelude(String source, {required String fileName}) {
+    final parsed = parseString(content: source, throwIfDiagnostics: false);
+    if (parsed.errors.isNotEmpty) return const [];
+    final converter = _Converter(
+      fileName,
+      (offset) => parsed.lineInfo.getLocation(offset).lineNumber,
+    );
+    try {
+      for (final decl in parsed.unit.declarations) {
+        if (decl is! ast.FunctionDeclaration || decl.name.lexeme != 'main') continue;
+        final body = decl.functionExpression.body;
+        if (body is! ast.BlockFunctionBody) return const [];
+        final out = <Stmt>[];
+        for (final s in body.block.statements) {
+          if (s is ast.ExpressionStatement) {
+            final e = s.expression;
+            final call = e is ast.AwaitExpression ? e.expression : e;
+            if (call is ast.MethodInvocation && call.target == null && call.methodName.name == 'runApp') {
+              return out;
+            }
+            if (e.toSource().startsWith('WidgetsFlutterBinding.')) continue;
+          }
+          out.addAll(converter.stmt(s));
+        }
+        return const [];
+      }
+    } on UnsupportedConstruct {
+      return const [];
+    }
+    return const [];
+  }
+}
+
+class FrontEndIssue {
+  final String message;
+  final int? line;
+  final bool isError;
+  const FrontEndIssue(this.message, {this.line, this.isError = false});
+}
+
+class FrontEndFileResult {
+  final List<WidgetClassDef> classes;
+  final List<FrontEndIssue> issues;
+  final bool hasSyntaxErrors;
+
+  /// متغيّرات ودوال المستوى الأعلى (top-level) في الملف.
+  final Map<String, Expr?> globalVars;
+  final List<MethodDef> globalFunctions;
+
+  const FrontEndFileResult({
+    required this.classes,
+    required this.issues,
+    required this.hasSyntaxErrors,
+    this.globalVars = const {},
+    this.globalFunctions = const [],
+  });
+
+  bool get hasConversionErrors => issues.any((i) => i.isError);
+
+  /// هل يصلح هذا الملف للاعتماد عليه بدل المُستخرِج القديم؟
+  bool get usable => !hasSyntaxErrors && !hasConversionErrors;
+
+  /// سبب عدم الصلاحية (للاستعمال في ملاحظة الكونسول).
+  String get unusableReason {
+    if (hasSyntaxErrors) return 'خطأ صياغة (يعالجه المُستخرِج القديم)';
+    final first = issues.firstWhere((i) => i.isError, orElse: () => const FrontEndIssue(''));
+    return first.line == null ? first.message : '${first.message} (السطر ${first.line})';
+  }
+}
+
+class UnsupportedConstruct implements Exception {
+  final String message;
+  final int? line;
+  UnsupportedConstruct(this.message, {this.line});
+  @override
+  String toString() => message;
+}
+
+class _Converter {
+  final String file;
+  final int Function(int offset) lineOf;
+  final List<WidgetClassDef> classes = [];
+  final List<FrontEndIssue> issues = [];
+  final Map<String, Expr?> globalVars = {};
+  final List<MethodDef> globalFunctions = [];
+
+  _Converter(this.file, this.lineOf);
+
+  int _tmp = 0;
+  final List<String> _casc = [];
+  String _newTemp() => '_nt${_tmp++}';
+
+  /// يُدخل المحدِّد التالي داخل أقرب NullAwareExpr (قصر الدائرة كما في Dart:
+  /// `a?.b.c` تساوي null كاملة إن كانت a null).
+  Expr _chain(Expr t, Expr Function(Expr base) build) =>
+      t is NullAwareExpr ? NullAwareExpr(t.target, t.temp, _chain(t.inner, build)) : build(t);
+
+  String _typeBase(ast.TypeAnnotation t) =>
+      t is ast.NamedType ? t.name.lexeme : t.toSource().replaceAll('?', '');
+
+  // ------------------------- أدوات عامة -------------------------
+
+  Never _unsupported(String what, ast.AstNode node) =>
+      throw UnsupportedConstruct('قيد في المعاينة: $what', line: lineOf(node.offset));
+
+  IdentifierExpr _ident(String name, int offset) => IdentifierExpr(name)
+    ..line = lineOf(offset)
+    ..file = file;
+
+  CallExpr _call(Expr callee, List<Expr> pos, Map<String, Expr> named, int offset) =>
+      CallExpr(callee, pos, named)
+        ..line = lineOf(offset)
+        ..file = file;
+
+  bool _isPure(Expr e) =>
+      e is IdentifierExpr ||
+      e is LiteralExpr ||
+      (e is PropertyExpr && _isPure(e.target)) ||
+      (e is IndexExpr && _isPure(e.target) && _isPure(e.index));
+
+  Expr _requirePure(Expr e, ast.AstNode node, String op) {
+    if (!_isPure(e)) {
+      _unsupported('العملية $op مع تعبير يحوي استدعاءً (يُقيَّم مرتين في المُفسِّر الحالي) — ضع القيمة في متغيّر أولًا', node);
+    }
+    return e;
+  }
+
+  Expr _nullTest(Expr value, String op) => BinaryExpr(value, op, LiteralExpr(null));
+
+  // ------------------------- الأصناف -------------------------
+
+  void classDecl(ast.ClassDeclaration d) {
+    final name = d.namePart.typeName.lexeme;
+    final ext = d.extendsClause?.superclass;
+    final superName = ext?.name.lexeme;
+    final typeArgs = ext?.typeArguments?.arguments;
+    final superArg = (typeArgs != null && typeArgs.isNotEmpty) ? typeArgs.first.toSource() : null;
+
+    final isStateless = superName == 'StatelessWidget';
+    final isStateful = superName == 'StatefulWidget';
+    final isState = superName == 'State';
+    final isObjectClass = !(isStateless || isStateful || isState);
+
+    final fields = <FieldDecl>[];
+    final methods = <MethodDef>[];
+    final ctors = <ConstructorDef>[];
+    List<Stmt>? buildBody;
+    String? buildParseError;
+    String? stateClassName = isState ? superArg : null;
+
+    for (final m in d.body.members) {
+      if (m is ast.FieldDeclaration) {
+        for (final v in m.fields.variables) {
+          final fieldName = v.name.lexeme;
+          try {
+            final init = v.initializer;
+            fields.add(FieldDecl(fieldName, init == null ? null : expr(init), isStatic: m.isStatic));
+          } on UnsupportedConstruct catch (e) {
+            issues.add(FrontEndIssue('الصنف $name، الحقل "$fieldName": ${e.message}', line: e.line, isError: true));
+          }
+        }
+      } else if (m is ast.ConstructorDeclaration) {
+        try {
+          ctors.add(_constructor(m));
+        } on UnsupportedConstruct catch (e) {
+          issues.add(FrontEndIssue('الصنف $name، المُنشئ: ${e.message}', line: e.line, isError: true));
+        }
+      } else if (m is ast.MethodDeclaration) {
+        final methodName = m.name.lexeme;
+        if (m.isOperator) {
+          issues.add(FrontEndIssue(
+              'الصنف $name: ${m.isSetter ? 'setter' : 'operator'} "$methodName" غير مدعوم في المعاينة بعد.',
+              line: lineOf(m.offset)));
+          continue;
+        }
+        if (methodName == 'createState' && !m.isStatic) {
+          stateClassName ??= _createdStateName(m);
+          continue;
+        }
+        final fnBody = m.body;
+        if (fnBody is ast.EmptyFunctionBody) continue; // abstract
+
+        try {
+          final paramDefs = _paramDefs(m.parameters);
+          final positionalNames = [
+            for (final p in paramDefs)
+              if (!p.isNamed) p.name,
+          ];
+          var body = _functionBody(fnBody);
+          if (methodName == 'build' && !m.isStatic) {
+            // المُفسِّر يربط BuildContext باسم "context" دائمًا: نُضيف اسمًا بديلًا
+            // إن سمّاه المستخدم بغير ذلك (مثل ctx).
+            final alias = positionalNames.isNotEmpty ? positionalNames.first : null;
+            if (alias != null && alias != 'context') {
+              body = [
+                VarDeclStmt(alias, _ident('context', m.offset))
+                  ..line = lineOf(m.offset)
+                  ..file = file,
+                ...body,
+              ];
+            }
+            buildBody = body;
+          } else {
+            methods.add(MethodDef(
+              methodName,
+              positionalNames,
+              body,
+              isAsync: fnBody.isAsynchronous,
+              paramDefs: paramDefs,
+              isGetter: m.isGetter,
+              isSetter: m.isSetter,
+              isStatic: m.isStatic,
+            ));
+          }
+        } on UnsupportedConstruct catch (e) {
+          final msg = 'الصنف $name، الدالة "$methodName": ${e.message}';
+          issues.add(FrontEndIssue(msg, line: e.line, isError: true));
+          if (methodName == 'build') buildParseError = msg;
+        }
+      }
+    }
+
+    final String? baseType = isState
+        ? 'State'
+        : isStateful
+            ? 'StatefulWidget'
+            : isStateless
+                ? 'StatelessWidget'
+                : superName;
+
+    classes.add(WidgetClassDef(
+      name: name,
+      baseType: baseType,
+      stateClassName: stateClassName,
+      fields: fields,
+      buildBody: buildBody,
+      buildParseError: buildParseError,
+      methods: methods,
+      sourceFile: file,
+      superName: superName,
+      isAbstract: d.abstractKeyword != null,
+      isObjectClass: isObjectClass,
+      constructors: ctors,
+      fromAnalyzer: true,
+    ));
+  }
+
+  List<ParamDef> _paramDefs(ast.FormalParameterList? list) {
+    final out = <ParamDef>[];
+    for (final p in list?.parameters ?? const <ast.FormalParameter>[]) {
+      final n = p.name;
+      if (n == null) continue;
+      final def = p.defaultClause;
+      out.add(ParamDef(
+        n.lexeme,
+        isNamed: p.isNamed,
+        isRequired: p.isRequired,
+        isThis: p is ast.FieldFormalParameter,
+        isSuper: p is ast.SuperFormalParameter,
+        defaultValue: def == null ? null : expr(def.value),
+      ));
+    }
+    return out;
+  }
+
+  ConstructorDef _constructor(ast.ConstructorDeclaration c) {
+    if (c.redirectedConstructor != null) {
+      _unsupported('مُنشئ factory معاد التوجيه (= OtherClass)', c);
+    }
+    final inits = <FieldInit>[];
+    CtorCall? superCall;
+    CtorCall? redirect;
+    for (final i in c.initializers) {
+      if (i is ast.ConstructorFieldInitializer) {
+        inits.add(FieldInit(i.fieldName.name, expr(i.expression)));
+      } else if (i is ast.SuperConstructorInvocation) {
+        final (pos, named) = _args(i.argumentList);
+        superCall = CtorCall(i.constructorName?.name ?? '', pos, named);
+      } else if (i is ast.RedirectingConstructorInvocation) {
+        final (pos, named) = _args(i.argumentList);
+        redirect = CtorCall(i.constructorName?.name ?? '', pos, named);
+      }
+      // assert(...) في قائمة التهيئة يُتجاهل.
+    }
+    final body = c.body is ast.EmptyFunctionBody ? <Stmt>[] : _functionBody(c.body);
+    return ConstructorDef(
+      c.name?.lexeme ?? '',
+      params: _paramDefs(c.parameters),
+      initializers: inits,
+      superCall: superCall,
+      redirect: redirect,
+      body: body,
+      isFactory: c.factoryKeyword != null,
+    );
+  }
+
+  /// enum المستخدم (بسيط أو محسَّن بحقول ومُنشئات ودوال): يُسجَّل كصنف كائنات
+  /// مع [WidgetClassDef.enumConstants]؛ ينشئ المُفسِّر ثوابته عند أول وصول.
+  void enumDecl(ast.EnumDeclaration d) {
+    final name = d.namePart.typeName.lexeme;
+    final fields = <FieldDecl>[];
+    final methods = <MethodDef>[];
+    final ctors = <ConstructorDef>[];
+    for (final m in d.body.members) {
+      if (m is ast.FieldDeclaration) {
+        for (final v in m.fields.variables) {
+          try {
+            final init = v.initializer;
+            fields.add(FieldDecl(v.name.lexeme, init == null ? null : expr(init), isStatic: m.isStatic));
+          } on UnsupportedConstruct catch (e) {
+            issues.add(FrontEndIssue('enum $name، الحقل "${v.name.lexeme}": ${e.message}', line: e.line, isError: true));
+          }
+        }
+      } else if (m is ast.ConstructorDeclaration) {
+        try {
+          ctors.add(_constructor(m));
+        } on UnsupportedConstruct catch (e) {
+          issues.add(FrontEndIssue('enum $name، المُنشئ: ${e.message}', line: e.line, isError: true));
+        }
+      } else if (m is ast.MethodDeclaration) {
+        if (m.isOperator || m.isSetter) continue;
+        final fnBody = m.body;
+        if (fnBody is ast.EmptyFunctionBody) continue;
+        try {
+          final paramDefs = _paramDefs(m.parameters);
+          methods.add(MethodDef(
+            m.name.lexeme,
+            [for (final p in paramDefs) if (!p.isNamed) p.name],
+            _functionBody(fnBody),
+            isAsync: fnBody.isAsynchronous,
+            paramDefs: paramDefs,
+            isGetter: m.isGetter,
+            isStatic: m.isStatic,
+          ));
+        } on UnsupportedConstruct catch (e) {
+          issues.add(FrontEndIssue('enum $name، الدالة "${m.name.lexeme}": ${e.message}', line: e.line, isError: true));
+        }
+      }
+    }
+    final consts = <EnumConst>[];
+    for (final c in d.body.constants) {
+      try {
+        var pos = <Expr>[];
+        var named = <String, Expr>{};
+        final dynamic enumArgs = c.arguments;
+        final al = enumArgs?.argumentList as ast.ArgumentList?;
+        if (al != null) (pos, named) = _args(al);
+        consts.add(EnumConst(c.name.lexeme, pos, named));
+      } on UnsupportedConstruct catch (e) {
+        issues.add(FrontEndIssue('enum $name، الثابت "${c.name.lexeme}": ${e.message}', line: e.line, isError: true));
+      }
+    }
+    classes.add(WidgetClassDef(
+      name: name,
+      fields: fields,
+      methods: methods,
+      sourceFile: file,
+      isObjectClass: true,
+      constructors: ctors,
+      fromAnalyzer: true,
+      enumConstants: consts,
+    ));
+  }
+
+  /// دالة عليا (top-level): تُسجَّل كدالة عامة يراها كل المشروع.
+  void topFunction(ast.FunctionDeclaration d) {
+    if (d.isGetter || d.isSetter) return;
+    final fnName = d.name.lexeme;
+    try {
+      final fn = d.functionExpression;
+      final paramDefs = _paramDefs(fn.parameters);
+      globalFunctions.add(MethodDef(
+        fnName,
+        [for (final p in paramDefs) if (!p.isNamed) p.name],
+        _functionBody(fn.body),
+        isAsync: fn.body.isAsynchronous,
+        paramDefs: paramDefs,
+      ));
+    } on UnsupportedConstruct catch (e) {
+      issues.add(FrontEndIssue('الدالة "$fnName": ${e.message}', line: e.line, isError: true));
+    }
+  }
+
+  /// متغيّرات عليا (مثل `final routes = {...}` أو `const x = 1`).
+  void topVariables(ast.TopLevelVariableDeclaration d) {
+    for (final v in d.variables.variables) {
+      final varName = v.name.lexeme;
+      try {
+        final init = v.initializer;
+        globalVars[varName] = init == null ? null : expr(init);
+      } on UnsupportedConstruct catch (e) {
+        issues.add(FrontEndIssue('المتغيّر "$varName": ${e.message}', line: e.line, isError: true));
+      }
+    }
+  }
+
+  /// اسم صنف الحالة الذي تُعيده `createState()` (مثل `_HomeState` من
+  /// `createState() => _HomeState();` أو `{ return _HomeState(); }`).
+  String? _createdStateName(ast.MethodDeclaration m) {
+    ast.Expression? returned;
+    final b = m.body;
+    if (b is ast.ExpressionFunctionBody) {
+      returned = b.expression;
+    } else if (b is ast.BlockFunctionBody) {
+      for (final s in b.block.statements) {
+        if (s is ast.ReturnStatement) {
+          returned = s.expression;
+          break;
+        }
+      }
+    }
+    if (returned is ast.MethodInvocation && returned.target == null) return returned.methodName.name;
+    if (returned is ast.InstanceCreationExpression) return returned.constructorName.type.name.lexeme;
+    return null;
+  }
+
+  // ------------------------- أجسام الدوال والجمل -------------------------
+
+  List<Stmt> _functionBody(ast.FunctionBody body) {
+    if (body is ast.ExpressionFunctionBody) {
+      return [
+        ReturnStmt(expr(body.expression))
+          ..line = lineOf(body.expression.offset)
+          ..file = file,
+      ];
+    }
+    if (body is ast.BlockFunctionBody) return _block(body.block);
+    return const [];
+  }
+
+  List<Stmt> _block(ast.Block block) => [for (final s in block.statements) ...stmt(s)];
+
+  /// جملة أو كتلة كقائمة جُمل (جسم if/for/while).
+  List<Stmt> _bodyOf(ast.Statement s) => s is ast.Block ? _block(s) : stmt(s);
+
+  List<Stmt> stmt(ast.Statement s) {
+    final out = _stmtInner(s);
+    final line = lineOf(s.offset);
+    for (final x in out) {
+      if (x.line == 0) x.line = line;
+      x.file ??= file;
+    }
+    return out;
+  }
+
+  List<Stmt> _stmtInner(ast.Statement s) {
+    if (s is ast.Block) return _block(s);
+    if (s is ast.EmptyStatement) return const [];
+    if (s is ast.ExpressionStatement) return [_exprStmt(s.expression)];
+    if (s is ast.ReturnStatement) {
+      final e = s.expression;
+      return [ReturnStmt(e == null ? null : expr(e))];
+    }
+    if (s is ast.VariableDeclarationStatement) {
+      return [
+        for (final v in s.variables.variables)
+          VarDeclStmt(v.name.lexeme, v.initializer == null ? null : expr(v.initializer!)),
+      ];
+    }
+    if (s is ast.IfStatement) {
+      if (s.caseClause != null) _unsupported('if-case (مطابقة الأنماط)', s);
+      final elseS = s.elseStatement;
+      return [IfStmt(expr(s.expression), _bodyOf(s.thenStatement), elseS == null ? const [] : _bodyOf(elseS))];
+    }
+    if (s is ast.ForStatement) return [_forStatement(s)];
+    if (s is ast.WhileStatement) return [WhileStmt(expr(s.condition), _bodyOf(s.body))];
+    if (s is ast.BreakStatement) return [BreakStmt()];
+    if (s is ast.ContinueStatement) return [ContinueStmt()];
+    if (s is ast.FunctionDeclarationStatement) {
+      final fn = s.functionDeclaration;
+      return [VarDeclStmt(fn.name.lexeme, _lambda(fn.functionExpression))];
+    }
+    if (s is ast.TryStatement) return [_tryStatement(s)];
+    if (s is ast.SwitchStatement) return [_switchStatement(s)];
+    if (s is ast.DoStatement) return [DoWhileStmt(_bodyOf(s.body), expr(s.condition))];
+    _unsupported('الجملة من نوع ${s.runtimeType} (مثل switch بأنماط أو yield أو label)', s);
+  }
+
+  /// أنماط case المدعومة: قيمة ثابتة، `a || b`، وأقواس.
+  List<Expr> _patternTests(ast.DartPattern p, ast.AstNode at) {
+    if (p is ast.ConstantPattern) return [expr(p.expression)];
+    if (p is ast.LogicalOrPattern) {
+      return [..._patternTests(p.leftOperand, at), ..._patternTests(p.rightOperand, at)];
+    }
+    if (p is ast.ParenthesizedPattern) return _patternTests(p.pattern, at);
+    _unsupported('نمط (pattern) غير مدعوم في switch — المدعوم: قيم ثابتة و||', at);
+  }
+
+  Stmt _tryStatement(ast.TryStatement s) {
+    final clauses = <CatchDef>[];
+    for (final c in s.catchClauses) {
+      final t = c.exceptionType;
+      clauses.add(CatchDef(
+        t == null ? null : _typeBase(t),
+        c.exceptionParameter?.name.lexeme,
+        c.stackTraceParameter?.name.lexeme,
+        _block(c.body),
+      ));
+    }
+    final fin = s.finallyBlock;
+    return TryStmt(_block(s.body), clauses, fin == null ? const [] : _block(fin));
+  }
+
+  /// switch الكلاسيكي (case قيمة / default). الأنماط (patterns) غير مدعومة.
+  Stmt _switchStatement(ast.SwitchStatement s) {
+    final cases = <SwitchCaseDef>[];
+    var pending = <Expr>[];
+    var pendingDefault = false;
+    for (final m in s.members) {
+      final List<ast.Statement> stmts;
+      if (m is ast.SwitchCase) {
+        pending.add(expr(m.expression));
+        stmts = m.statements;
+      } else if (m is ast.SwitchPatternCase) {
+        // Dart 3: حتى `case 1:` العادية تُقرأ كنمط ثابت (ConstantPattern).
+        // وصول ديناميكي عمدًا: شكل الـAPI (guardedPattern.pattern أو pattern مباشرة) يختلف بين إصدارات analyzer.
+        final dynamic dm = m;
+        dynamic pat;
+        dynamic whenC;
+        try {
+          pat = dm.guardedPattern.pattern;
+          whenC = dm.guardedPattern.whenClause;
+        } catch (_) {
+          pat = dm.pattern;
+          whenC = dm.whenClause;
+        }
+        if (whenC != null) _unsupported('switch مع شرط when', s);
+        if (pat is ast.WildcardPattern) {
+          pendingDefault = true;
+        } else {
+          pending.addAll(_patternTests(pat, s));
+        }
+        stmts = m.statements;
+      } else if (m is ast.SwitchDefault) {
+        pendingDefault = true;
+        stmts = m.statements;
+      } else {
+        _unsupported('switch بأنماط (patterns)', s);
+      }
+      if (stmts.isEmpty) continue; // case فارغ = يمرّ للتالي (fallthrough)
+      cases.add(SwitchCaseDef(pending, pendingDefault, [for (final st in stmts) ...stmt(st)]));
+      pending = <Expr>[];
+      pendingDefault = false;
+    }
+    if (pending.isNotEmpty || pendingDefault) cases.add(SwitchCaseDef(pending, pendingDefault, const []));
+    return SwitchStmt(expr(s.expression), cases);
+  }
+
+  Stmt _forStatement(ast.ForStatement s) {
+    if (s.awaitKeyword != null) _unsupported('await for', s);
+    final parts = s.forLoopParts;
+    final body = _bodyOf(s.body);
+    if (parts is ast.ForEachPartsWithDeclaration) {
+      return ForInStmt(parts.loopVariable.name.lexeme, expr(parts.iterable), body);
+    }
+    if (parts is ast.ForPartsWithDeclarations) {
+      final vars = parts.variables.variables;
+      if (vars.length != 1) _unsupported('أكثر من متغير في تهيئة حلقة for', s);
+      final v = vars.first;
+      final init = VarDeclStmt(v.name.lexeme, v.initializer == null ? null : expr(v.initializer!))
+        ..line = lineOf(v.offset)
+        ..file = file;
+      return ForStmt(init, parts.condition == null ? null : expr(parts.condition!), _updater(parts, s), body);
+    }
+    if (parts is ast.ForPartsWithExpression) {
+      final init = parts.initialization == null ? null : _exprStmt(parts.initialization!);
+      return ForStmt(init, parts.condition == null ? null : expr(parts.condition!), _updater(parts, s), body);
+    }
+    _unsupported('شكل حلقة for غير مدعوم', s);
+  }
+
+  Stmt? _updater(ast.ForParts parts, ast.AstNode node) {
+    final updaters = parts.updaters;
+    if (updaters.isEmpty) return null;
+    if (updaters.length > 1) _unsupported('أكثر من تعبير تحديث في حلقة for', node);
+    return _exprStmt(updaters.first);
+  }
+
+  Stmt _exprStmt(ast.Expression e) {
+    final result = _exprStmtInner(e);
+    result
+      ..line = lineOf(e.offset)
+      ..file = file;
+    return result;
+  }
+
+  Stmt _exprStmtInner(ast.Expression e) {
+    if (e is ast.AssignmentExpression) return _assignment(e);
+    if (e is ast.PostfixExpression && (e.operator.lexeme == '++' || e.operator.lexeme == '--')) {
+      return IncDecStmt(_target(e.operand), e.operator.lexeme);
+    }
+    if (e is ast.PrefixExpression && (e.operator.lexeme == '++' || e.operator.lexeme == '--')) {
+      return IncDecStmt(_target(e.operand), e.operator.lexeme);
+    }
+    return ExprStmt(expr(e));
+  }
+
+  Expr _target(ast.Expression e) => expr(e);
+
+  Stmt _assignment(ast.AssignmentExpression e) {
+    final target = _target(e.leftHandSide);
+    final value = expr(e.rightHandSide);
+    switch (e.operator.lexeme) {
+      case '=':
+      case '+=':
+      case '-=':
+        return AssignStmt(target, e.operator.lexeme, value);
+      case '*=':
+      case '/=':
+      case '%=':
+        _requirePure(target, e, e.operator.lexeme);
+        return AssignStmt(target, '=', BinaryExpr(target, e.operator.lexeme.substring(0, 1), value));
+      case '??=':
+        _requirePure(target, e, '??=');
+        return AssignStmt(target, '=', TernaryExpr(_nullTest(target, '!='), target, value));
+    }
+    _unsupported('عامل التعيين ${e.operator.lexeme}', e);
+  }
+
+  // ------------------------- التعبيرات -------------------------
+
+  Expr expr(ast.Expression e) {
+    if (e is ast.ParenthesizedExpression) return expr(e.expression);
+    if (e is ast.IntegerLiteral) {
+      final v = e.value;
+      if (v == null) _unsupported('عدد صحيح خارج المدى', e);
+      return LiteralExpr(v);
+    }
+    if (e is ast.DoubleLiteral) return LiteralExpr(e.value);
+    if (e is ast.BooleanLiteral) return LiteralExpr(e.value);
+    if (e is ast.NullLiteral) return LiteralExpr(null);
+    if (e is ast.SimpleStringLiteral) return LiteralExpr(e.value);
+    if (e is ast.StringInterpolation) return _interpolation([e]);
+    if (e is ast.AdjacentStrings) return _interpolation(e.strings);
+    if (e is ast.SimpleIdentifier) return _ident(e.name, e.offset);
+    if (e is ast.PrefixedIdentifier) {
+      return PropertyExpr(_ident(e.prefix.name, e.prefix.offset), e.identifier.name);
+    }
+    if (e is ast.PropertyAccess) return _propertyAccess(e);
+    if (e is ast.MethodInvocation) return _methodInvocation(e);
+    if (e is ast.InstanceCreationExpression) return _creation(e);
+    if (e is ast.ListLiteral) return ListExpr(_listElements(e.elements));
+    if (e is ast.SetOrMapLiteral) return _mapLiteral(e);
+    if (e is ast.BinaryExpression) return _binary(e);
+    if (e is ast.PrefixExpression) {
+      final op = e.operator.lexeme;
+      if (op == '!' || op == '-') return UnaryExpr(op, expr(e.operand));
+      _unsupported('العامل الأحادي $op', e);
+    }
+    if (e is ast.PostfixExpression) {
+      if (e.operator.lexeme == '!') return expr(e.operand);
+      _unsupported('العامل ${e.operator.lexeme} داخل تعبير', e);
+    }
+    if (e is ast.ConditionalExpression) {
+      return TernaryExpr(expr(e.condition), expr(e.thenExpression), expr(e.elseExpression));
+    }
+    if (e is ast.IndexExpression) {
+      final target = e.target;
+      if (target == null && _casc.isEmpty) _unsupported('فهرسة داخل cascade', e);
+      return _chain(target == null ? _ident(_casc.last, e.offset) : expr(target), (base) {
+        final idx = expr(e.index);
+        if (!e.isNullAware) return IndexExpr(base, idx);
+        final tmp = _newTemp();
+        return NullAwareExpr(base, tmp, IndexExpr(_ident(tmp, e.offset), idx));
+      });
+    }
+    if (e is ast.FunctionExpression) return _lambda(e);
+    if (e is ast.AwaitExpression) return AwaitExpr(expr(e.expression));
+    if (e is ast.AsExpression) return expr(e.expression);
+    if (e is ast.ThisExpression) return _ident('this', e.offset);
+    if (e is ast.SuperExpression) return _ident('super', e.offset);
+    if (e is ast.ThrowExpression) return ThrowExpr(expr(e.expression));
+    if (e is ast.RethrowExpression) return ThrowExpr(null);
+    if (e is ast.CascadeExpression) {
+      final tmp = _newTemp();
+      final targetExpr = expr(e.target);
+      _casc.add(tmp);
+      try {
+        return CascadeExpr(targetExpr, tmp, [for (final sec in e.cascadeSections) _exprStmt(sec)]);
+      } finally {
+        _casc.removeLast();
+      }
+    }
+    if (e is ast.IsExpression) {
+      return IsExpr(expr(e.expression), _typeBase(e.type), e.notOperator != null,
+          nullable: e.type.question != null);
+    }
+    _unsupported('التعبير من نوع ${e.runtimeType}', e);
+  }
+
+  Expr _interpolation(List<ast.StringLiteral> strings) {
+    final parts = <Object>[];
+    void addText(String s) {
+      if (s.isEmpty) return;
+      if (parts.isNotEmpty && parts.last is String) {
+        parts[parts.length - 1] = (parts.last as String) + s;
+      } else {
+        parts.add(s);
+      }
+    }
+
+    for (final s in strings) {
+      if (s is ast.SimpleStringLiteral) {
+        addText(s.value);
+      } else if (s is ast.StringInterpolation) {
+        for (final el in s.elements) {
+          if (el is ast.InterpolationString) {
+            addText(el.value);
+          } else if (el is ast.InterpolationExpression) {
+            parts.add(expr(el.expression));
+          }
+        }
+      } else {
+        _unsupported('نص من نوع ${s.runtimeType}', s);
+      }
+    }
+    if (parts.isEmpty) return LiteralExpr('');
+    if (parts.length == 1 && parts.first is String) return LiteralExpr(parts.first);
+    return InterpolationExpr(parts);
+  }
+
+  Expr _propertyAccess(ast.PropertyAccess e) {
+    final target = e.target;
+    if (target == null && _casc.isEmpty) _unsupported('وصول خاصية داخل cascade', e);
+    final name = e.propertyName.name;
+    return _chain(target == null ? _ident(_casc.last, e.offset) : expr(target), (base) {
+      if (!e.isNullAware) return PropertyExpr(base, name);
+      final tmp = _newTemp();
+      return NullAwareExpr(base, tmp, PropertyExpr(_ident(tmp, e.offset), name));
+    });
+  }
+
+  (List<Expr>, Map<String, Expr>) _args(ast.ArgumentList list) {
+    final pos = <Expr>[];
+    final named = <String, Expr>{};
+    for (final a in list.arguments) {
+      if (a is ast.NamedArgument) {
+        named[a.name.lexeme] = expr(a.argumentExpression);
+      } else {
+        pos.add(expr(a.argumentExpression));
+      }
+    }
+    return (pos, named);
+  }
+
+  Expr _methodInvocation(ast.MethodInvocation n) {
+    final cascBase = (n.isCascaded && _casc.isNotEmpty) ? _ident(_casc.last, n.offset) : null;
+    if (n.isCascaded && cascBase == null) _unsupported('cascade (..)', n);
+    final target = cascBase == null ? n.target : null;
+    final name = n.methodName.name;
+    final (pos, named) = _args(n.argumentList);
+    if (target == null && cascBase == null) {
+      return _call(_ident(name, n.methodName.offset), pos, named, n.offset);
+    }
+    return _chain(cascBase ?? expr(target!), (base) {
+      if (!n.isNullAware) return _call(PropertyExpr(base, name), pos, named, n.offset);
+      final tmp = _newTemp();
+      return NullAwareExpr(base, tmp, _call(PropertyExpr(_ident(tmp, n.offset), name), pos, named, n.offset));
+    });
+  }
+
+  Expr _creation(ast.InstanceCreationExpression n) {
+    final t = n.constructorName.type;
+    var type = t.name.lexeme;
+    var ctor = n.constructorName.name?.name;
+    // `const EdgeInsets.all(8)`: المحلل غير المحلول يقرأ `EdgeInsets.all` كنوع ببادئة
+    // (prefix.Type) لا كصنف + مُنشئ مسمّى؛ بادئة تبدأ بحرف كبير = اسم صنف حقيقي.
+    final pfx = t.importPrefix?.name.lexeme;
+    if (ctor == null && pfx != null && pfx.isNotEmpty && pfx[0] != pfx[0].toLowerCase()) {
+      ctor = type;
+      type = pfx;
+    }
+    final (pos, named) = _args(n.argumentList);
+    final typeIdent = _ident(type, t.offset);
+    final callee = ctor == null ? typeIdent : PropertyExpr(typeIdent, ctor);
+    return _call(callee, pos, named, n.offset);
+  }
+
+  Expr _binary(ast.BinaryExpression e) {
+    final op = e.operator.lexeme;
+    final left = expr(e.leftOperand);
+    final right = expr(e.rightOperand);
+    switch (op) {
+      case '+':
+      case '-':
+      case '*':
+      case '/':
+      case '%':
+      case '==':
+      case '!=':
+      case '<':
+      case '>':
+      case '<=':
+      case '>=':
+      case '&&':
+      case '||':
+        return BinaryExpr(left, op, right);
+      case '??':
+        return CoalesceExpr(left, right);
+    }
+    _unsupported('العامل $op', e);
+  }
+
+  Expr _mapLiteral(ast.SetOrMapLiteral e) {
+    final entries = <MapEntryNode>[];
+    for (final el in e.elements) {
+      if (el is ast.MapLiteralEntry) {
+        entries.add(MapEntryNode(expr(el.key), expr(el.value)));
+      } else {
+        _unsupported('عنصر ${el.runtimeType} داخل Map/Set (Set أو spread أو if غير مدعومة)', el);
+      }
+    }
+    return MapExpr(entries);
+  }
+
+  // ------------------------- عناصر القوائم -------------------------
+
+  ListExpr _emptyList() => ListExpr(<Object>[]);
+  ListExpr _singleton() => ListExpr(<Object>[LiteralExpr(0)]);
+
+  List<Object> _listElements(Iterable<ast.CollectionElement> elements) => [
+        for (final el in elements) ..._collect(el, null),
+      ];
+
+  /// يحوّل عنصر قائمة إلى عناصر المُفسِّر (Expr أو ListForElement...). [guard]
+  /// شرط تراكمي من `if` المحيطة (أو null).
+  List<Object> _collect(ast.CollectionElement el, Expr? guard) {
+    if (el is ast.Expression) {
+      final value = expr(el);
+      if (guard == null) return [value];
+      return [ListForElement('_if', TernaryExpr(guard, _singleton(), _emptyList()), value)];
+    }
+    if (el is ast.SpreadElement) {
+      var iterable = expr(el.expression);
+      if (el.isNullAware) {
+        _requirePure(iterable, el, '...?');
+        iterable = TernaryExpr(_nullTest(iterable, '!='), iterable, _emptyList());
+      }
+      if (guard != null) iterable = TernaryExpr(guard, iterable, _emptyList());
+      return [ListForElement('_sp', iterable, _ident('_sp', el.offset))];
+    }
+    if (el is ast.IfElement) {
+      if (el.caseClause != null) _unsupported('if-case داخل قائمة', el);
+      final cond = expr(el.expression);
+      final thenGuard = guard == null ? cond : BinaryExpr(guard, '&&', cond);
+      final out = <Object>[..._collect(el.thenElement, thenGuard)];
+      final elseEl = el.elseElement;
+      if (elseEl != null) {
+        final negated = UnaryExpr('!', cond);
+        out.addAll(_collect(elseEl, guard == null ? negated : BinaryExpr(guard, '&&', negated)));
+      }
+      return out;
+    }
+    if (el is ast.ForElement) {
+      if (guard != null) _unsupported('for داخل if في قائمة', el);
+      if (el.awaitKeyword != null) _unsupported('await for', el);
+      final body = el.body;
+      if (body is! ast.Expression) _unsupported('عنصر مركّب داخل for في قائمة (فقط تعبير واحد مدعوم)', el);
+      final parts = el.forLoopParts;
+      if (parts is ast.ForEachPartsWithDeclaration) {
+        return [ListForElement(parts.loopVariable.name.lexeme, expr(parts.iterable), expr(body))];
+      }
+      if (parts is ast.ForPartsWithDeclarations) {
+        final vars = parts.variables.variables;
+        if (vars.length != 1) _unsupported('أكثر من متغير في for داخل قائمة', el);
+        final v = vars.first;
+        final init = VarDeclStmt(v.name.lexeme, v.initializer == null ? null : expr(v.initializer!))
+          ..line = lineOf(v.offset)
+          ..file = file;
+        return [
+          ListClassicForElement(
+            init,
+            parts.condition == null ? null : expr(parts.condition!),
+            _updater(parts, el),
+            expr(body),
+          ),
+        ];
+      }
+      _unsupported('شكل for داخل قائمة غير مدعوم', el);
+    }
+    _unsupported('عنصر قائمة من نوع ${el.runtimeType}', el);
+  }
+
+  // ------------------------- الدوال المجهولة -------------------------
+
+  LambdaExpr _lambda(ast.FunctionExpression f) {
+    final params = <String>[];
+    for (final p in f.parameters?.parameters ?? const <ast.FormalParameter>[]) {
+      final n = p.name;
+      if (n != null) params.add(n.lexeme);
+    }
+    return LambdaExpr(params, _functionBody(f.body), isAsync: f.body.isAsynchronous);
+  }
+}
